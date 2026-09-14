@@ -4,6 +4,8 @@
 
 Persistent context for Nick's Cowork sessions is stored in `claude-memory/`. At the start of any new session, read `claude-memory/MEMORY.md` to load full context — video workflow, content system, style rules, and file references.
 
+> **2026-09-13 — this folder does not exist in git history.** Checked `git log --all -- claude-memory/` and `git ls-tree HEAD claude-memory/` — both empty. It's not `.gitignore`'d either. Whatever populates it (Cowork sessions, presumably) has never committed it to this repo, so it does not sync between machines. Don't assume a session on a different machine can see anything written there on this one. If this is meant to be a real shared resource, it needs to actually be committed at some point — right now it's aspirational text pointing at nothing.
+
 ---
 
 ## WHO WE ARE
@@ -415,7 +417,7 @@ Fetches Tasks + Leads + Clients in parallel. Shows: active leads, pipeline value
 |---|------|--------|
 | 1 | Google Sheets connection (4 tabs) | ✅ Done |
 | 2 | Task Manager v4 | ✅ Done — list/board/schedule/doc, Sheets sync |
-| 3 | Lead Tracker v3 | ✅ Done — kanban, scoring, activity log, dashboard |
+| 3 | Lead Tracker v3 | ✅ Done — kanban, scoring, activity log, dashboard. **2026-09-11/12 additions:** Needs Assignment queue, languages/unit-type/last-updated card fields, multi-line activity log with edit/delete, 248-country phone picker + 242-nationality search. All live and pushed. |
 | 4 | CEO Dashboard | ✅ Done — live morning view, pipeline, agent breakdown |
 | 5 | Commission Tracker | ✅ Done — deal logging, auto-split |
 | 6 | Client Manager | ✅ Done — payment schedules, SPA/title status |
@@ -442,6 +444,8 @@ Fetches Tasks + Leads + Clients in parallel. Shows: active leads, pipeline value
 10. **Two files named `PHC_AppsScript.gs`** — a stale duplicate lives at `~/Desktop/phc-website/PHC Website (Claude Code)/PHC_AppsScript.gs` (missing referral columns and the whole Payment Reminder Bot). Always edit the one in this repo. See `docs/PHC_Telegram_Bots_Reference.html`.
 11. **Telegram chat IDs from Sheets need `normalizeChatId()`** — Sheets converts a typed numeric chat/group ID into a JS `Number`; sent raw to Telegram's API this produces a silent `400 "chat not found"` even though the string form works. Always normalize any Sheets-sourced chat ID before calling `sendMessage`.
 12. **A bot can only poll OR use a webhook, never both** — if a webhook URL is ever set, `getUpdates` polling returns empty forever regardless of real activity. Check with `getWebhookInfo` when a bot seems to receive nothing.
+13. **File-mode noise after a Mac reset/restore** — a restore can flip every tracked file's executable bit (644→755) without touching content, making `git status` show hundreds of "modified" files that are actually identical. Diagnose with `git -c core.fileMode=false status --short` (if the count drops to near-zero, it's mode noise, not real edits) and fix permanently with `git config core.fileMode false`. Hit this 2026-09-11/12 on both phc-tools and phc-website after Nick's Mac was reset — 1057 "changed" files in phc-website, all but 2 were pure mode flips.
+14. **Never `git add -A` without checking `git status` first** — if there's pre-existing uncommitted work sitting in the tree (someone's WIP from another session, a different machine's leftovers), `-A` silently bundles it into your commit. This repo has hit exactly this: a local checkout sat 40 commits behind origin with 88 files of stale/uncommitted local state. Stage specific files by name instead, and if you find unrelated dirty state blocking a merge, `git stash push -u -m "<description>"` it rather than discarding — see the Decisions Log entry for 2026-09-11/12 for how a real recovery played out (2 of ~88 stashed files turned out to be genuine unrecovered work, not stale drafts).
 
 ---
 
@@ -450,12 +454,7 @@ Fetches Tasks + Leads + Clients in parallel. Shows: active leads, pipeline value
 ```bash
 cd /Users/narithk/Desktop/phc-tools
 
-# Standard push
-git add -A
-git commit -m "feat/fix: description"
-git push
-
-# Push a single file
+# Standard push — stage specific files, not -A (see Gotcha #14 above)
 git add PHC_Task_Manager_v4.html
 git commit -m "fix: description"
 git push
@@ -466,6 +465,10 @@ rm .git/index.lock .git/HEAD.lock
 
 GitHub Pages auto-deploys ~30 seconds after push.  
 All tools live at: https://narithkgame2.github.io/phc-tools/
+
+**Credential gotcha (hit 2026-09-11, likely to recur after any Mac reset):** signing into GitHub Desktop does *not* give command-line `git` push access — GitHub Desktop stores its login under its own macOS Keychain entry (`GitHub - https://api.github.com`), in a format the standard git credential helper doesn't read. Command-line `git push` will still fail with `could not read Username for 'https://github.com'` even with GitHub Desktop fully signed in. Fastest fix: just push from GitHub Desktop's own UI (it has working credentials) instead of fighting a second CLI credential setup — click the repo's "Push origin" button in its toolbar. This applies per-repo (hit it separately on both phc-tools and phc-website).
+
+**Before pushing, always check for divergence first** — `git fetch origin && git log --oneline HEAD..origin/main | wc -l`. A local checkout can silently fall behind while other sessions/machines push (Nick works from a PC too). If it's behind, merge before pushing, and expect real conflicts on any file recently touched from both sides — check `git show --stat <remote-commit>` for the specific commits before assuming a conflict is trivial.
 
 ---
 
@@ -529,3 +532,6 @@ Fonts: **DM Sans** (UI) · **DM Serif Display** (hero only) · **DM Mono** (labe
 | 2026-07-17 | Every tool uses the sidebar shell pattern (not topbar-only), colored with the live website's actual dark navy/gold theme, not the lighter `--navy`/`--gold` used in content areas | Unifies the whole suite visually; matches PHC's real brand instead of ad-hoc purple/grey placeholders that had crept into Lead Tracker/Client Manager over time. See DESIGN SYSTEM section above for the full spec. |
 | 2026-07-20 | Payment Reminder Bot is a separate bot (@PHC_ClientCare_Bot) from @PHC_Content_Bot, code added to `PHC_AppsScript.gs` rather than a new file | Nick's explicit request — this bot lives inside private client groups, kept distinct from the public listing-distribution bot. Reuses the CRM script's existing `Clients` tab rather than duplicating client data. |
 | 2026-07-20 | Non-Telegram clients are never auto-sent-to or silently skipped by the Payment Reminder Bot — they're flagged by name in a separate message | Prevents duplicate reminders across platforms (some clients use WhatsApp, not Telegram) while still guaranteeing nobody is missed. |
+| 2026-09-11 | PopDeal-parity work rejected Lead Pool and Daily Quota as features | Lead Tracker's existing `autoAssign()` (nationality-based routing, load-balance fallback) already solves what PopDeal's Lead Pool solves, better — a first-come claim queue would be a regression, not an upgrade. Full gap analysis lives in two artifacts published that session (not in this repo). |
+| 2026-09-11/12 | This Mac's local `main` had drifted 40 commits behind origin (last real sync predates 2026-08-06) | Root cause: git credentials broke in a Mac reset, silently blocking pushes/pulls for weeks. Merged clean — 1 real conflict (favicon/logo, both sides independently fixed the same placeholder-logo problem; kept origin's version since it was already consistent across 10+ tools). **If you're reading this from a session on the PC or another machine: check `git fetch && git log --oneline HEAD..origin/main` before assuming your checkout is current — this can recur.** |
+| 2026-09-12 | Dropped ~86 of ~88 files of stale uncommitted local state found on this Mac (stashed first via `git stash push -u`, never force-discarded) | Verified file-by-file: pre-rebuild snapshots of files the 40 merged commits had already substantially reworked (Message Builder, Commission Tracker, Sales Desk, etc.), or literally empty stub files. **2 files were genuine unrecovered work and are still sitting in `stash@{0}` as of this writing, not yet applied:** (1) `PHC_ContentBot_AppsScript.gs` — a price-drop "repost as new message" feature, dated 2026-08-25, explicitly because Nick disliked the old edit-in-place banner behavior; this is a live deployed script, recovering it means redeploying too. (2) `content-os/docs/ROADMAP.md` — an "Analytics-Driven Content Sourcing" initiative section dated 2026-09-03, newer than HEAD's June 2026 version. Ask Nick before touching `stash@{0}` — don't assume it's safe to drop wholesale just because most of it was. |
