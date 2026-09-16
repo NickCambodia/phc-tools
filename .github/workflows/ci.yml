@@ -1,0 +1,31 @@
+name: CI
+
+# Informational only — never a required/blocking check. GitHub Pages deploys
+# directly off `main` regardless of what this workflow reports, exactly as
+# it does today. This exists to catch bugs, not to gate anything.
+on:
+  push:
+  pull_request:
+
+jobs:
+  syntax-check:
+    name: Syntax check (all tools)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: node .github/scripts/syntax-check.mjs
+
+  smoke-test:
+    name: Browser smoke test (all tools)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      # Exact version pinned deliberately — no lockfile exists anywhere in
+      # this repo, so nothing else catches version drift. Bump on purpose,
+      # not by accident.
+      - run: npm install --no-save playwright@1.61.0
+      - run: npx playwright install --with-deps chromium
+      - run: node .github/scripts/smoke-test.mjs

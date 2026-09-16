@@ -472,6 +472,67 @@ All tools live at: https://narithkgame2.github.io/phc-tools/
 
 ---
 
+## CI + RECURRING AUDIT (added 2026-09-16)
+
+Built after the 40-commit-drift incident above — the goal is catching drift
+and regressions automatically instead of by accident.
+
+**`.github/workflows/ci.yml`** — runs on every push/PR. **Never a required or
+blocking check** — GitHub Pages keeps deploying straight off `main`
+regardless of what this reports, exactly as before. Two jobs:
+- `syntax-check` — extracts every tool's `<script>` content, checks it
+  parses via `node --check`. Uses `.cjs`, not `.mjs`, deliberately — these
+  tools ship as plain non-module `<script>` tags (sloppy-mode semantics),
+  and `.mjs`'s strict-module parsing produces false positives on legal
+  patterns this codebase actually uses (e.g. `PHC_Sales_Desk.html`'s
+  deliberate `doSave()` monkey-patch — two same-named top-level function
+  declarations, which is legal in sloppy mode, illegal in a module).
+- `smoke-test` — Playwright, pinned to `1.61.0` (bump on purpose, not by
+  `@latest` drift — no lockfile exists anywhere in this repo to catch that
+  otherwise), loads all 19 tools in a real headless browser, bypasses the
+  password gate via `sessionStorage.phc_agent_auth='1'` (same key the app
+  itself checks), asserts zero console errors.
+  **Non-negotiable safety requirement, already implemented and verified
+  working:** several tools (Lead Tracker, Task Manager, ...) fetch the real
+  production `PHC_AppsScript.gs` Web App — i.e. the live Google Sheets CRM
+  — on load. `.github/scripts/smoke-test.mjs` intercepts every request to
+  `script.google.com` and Google Fonts via Playwright's `page.route()` and
+  returns a canned response. Verified locally (2026-09-16) that both real
+  Lead Tracker calls (`getAll&sheet=Leads`, `getAll&sheet=Partners`) get
+  caught by the mock, zero real requests reach Google. If you ever touch
+  this file, re-verify that interception still fires before trusting it —
+  a silently-broken mock would mean CI starts hitting production data on
+  every push.
+- Both scripts live in `.github/scripts/` and install their own tooling
+  fresh inside the CI runner only (`npm install --no-save playwright@1.61.0`)
+  — nothing is committed to the repo beyond the workflow + scripts
+  themselves. No `package.json`, no `node_modules`, no build step added to
+  the actual product. This was checked deliberately against the repo's
+  "single-file HTML, no build step, no framework" rule before building —
+  that rule governs the product and its deploy path, both untouched.
+
+**Recurring audit — cloud routines** (via the `schedule` skill /
+`RemoteTrigger`, not a local cron job — survives this Mac's credential
+issues entirely since each firing is a fresh cloud session with its own git
+clone). Two routines, `phc-tools weekly audit` and a matching one on
+phc-website. Nick chose **PR-based review** for autonomy: safe/mechanical
+findings (stale docs, formatting, zero business-logic risk) get a PR to
+review and merge whenever convenient; anything bigger becomes a report
+only. Never commits to `main` directly. See the full design rationale in
+the plan this was built from if you need it:
+`~/.claude/plans/majestic-imagining-moonbeam.md` (local to the Mac that
+built this — may not exist on other machines; the summary here is the
+durable record).
+
+**Still open as of 2026-09-16:** branch protection (requiring CI green
+before merge) was deliberately left out of this pass — it's a GitHub repo
+*setting*, not a file, and needs `gh` CLI or the web UI to configure. Worth
+turning on once CI has run clean a few times and it's trusted. Also: the
+PR-opening capability for the cloud routines needs to be verified with a
+throwaway test routine before depending on it — see the plan file.
+
+---
+
 ## ⛔ BUILD GUARDRAILS — PHC Tools
 
 These rules apply to every tool in this repo. Do not override without explicit instruction from Nick.
