@@ -511,25 +511,42 @@ regardless of what this reports, exactly as before. Two jobs:
   "single-file HTML, no build step, no framework" rule before building —
   that rule governs the product and its deploy path, both untouched.
 
-**Recurring audit — cloud routines** (via the `schedule` skill /
-`RemoteTrigger`, not a local cron job — survives this Mac's credential
-issues entirely since each firing is a fresh cloud session with its own git
-clone). Two routines, `phc-tools weekly audit` and a matching one on
-phc-website. Nick chose **PR-based review** for autonomy: safe/mechanical
-findings (stale docs, formatting, zero business-logic risk) get a PR to
-review and merge whenever convenient; anything bigger becomes a report
-only. Never commits to `main` directly. See the full design rationale in
-the plan this was built from if you need it:
-`~/.claude/plans/majestic-imagining-moonbeam.md` (local to the Mac that
-built this — may not exist on other machines; the summary here is the
-durable record).
+**Recurring audit — cloud routine, FULL AUTONOMY** (via the `schedule`
+skill / `RemoteTrigger`, not a local cron job — survives this Mac's
+credential issues entirely since each firing is a fresh cloud session with
+its own git clone). Routine: **`phc-tools autonomous audit`**
+(`trig_011mCmKTadsVcHwEDipMjoz8`), Mon/Wed/Fri 9am UTC. A matching routine
+runs for phc-website.
+
+This escalated past the original PR-based design above (superseded — the
+plan file this was originally built from, `~/.claude/plans/majestic-
+imagining-moonbeam.md`, still describes the earlier PR-only model; treat
+this CLAUDE.md section as the current source of truth, not that file).
+Nick explicitly asked for something closer to an autonomous agent with him
+as "human on the loop" rather than in it, and after being shown the
+tradeoff directly (silent drift is exactly what caused this session's
+40-commit incident), chose **full autonomy** anyway: the routine may commit
+**directly to `main`, no PR, no review step**, for anything it judges safe.
+
+Guardrails that stay in place regardless of that choice (not a review gate
+— basic quality control before anything ships):
+- Must re-run the same syntax-check + Playwright smoke-test CI already
+  uses, on its own change, before pushing.
+- Permanently out of scope for autonomous edits, no matter how safe it
+  looks: `PHC_AppsScript.gs` core CRM read/write logic, any commission or
+  payment calculation, the password-gate mechanism.
+- Anything business-logic-risky or uncertain gets written up as a report
+  only — never touched.
+- Sends exactly one summary email to narithkgame2@gmail.com after every
+  firing (subject `[phc-tools audit]`, via the Gmail MCP connector),
+  including on a clean run with nothing to fix — a silent audit is
+  indistinguishable from a broken one.
 
 **Still open as of 2026-09-16:** branch protection (requiring CI green
-before merge) was deliberately left out of this pass — it's a GitHub repo
-*setting*, not a file, and needs `gh` CLI or the web UI to configure. Worth
-turning on once CI has run clean a few times and it's trusted. Also: the
-PR-opening capability for the cloud routines needs to be verified with a
-throwaway test routine before depending on it — see the plan file.
+before merge) was deliberately left out — moot for direct-to-main pushes
+from this routine specifically, but still worth it as a backstop against
+anyone else's broken push. It's a GitHub repo *setting*, not a file, and
+needs `gh` CLI or the web UI to configure.
 
 ---
 
