@@ -556,7 +556,7 @@ input.vt-sel::placeholder{color:var(--text-m)}
         <div class="m-group"><label class="m-lbl">Phone / WhatsApp</label>
           <div style="display:flex;gap:5px">
             <button type="button" id="flagBtn" onclick="toggleFlagPicker(event)" title="Country code" style="padding:7px 9px;border:1px solid var(--border);border-radius:6px;background:var(--bg);cursor:pointer;flex-shrink:0;display:flex;align-items:center;gap:3px;font-size:15px;line-height:1;transition:border .15s" onmouseover="this.style.borderColor='var(--border-h)'" onmouseout="this.style.borderColor='var(--border)'"><span id="flagBtnIcon">🌐</span><svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="6,9 12,15 18,9"/></svg></button>
-            <input class="m-inp" id="mPhone" placeholder="+855 xx xxx xxx" oninput="detectNatFromPhone()" style="flex:1"/>
+            <input class="m-inp" id="mPhone" placeholder="+855 xx xxx xxx" oninput="detectNatFromPhone();detectFlagFromPhone()" style="flex:1"/>
           </div>
         </div>
         <div class="m-group"><label class="m-lbl">Telegram</label><input class="m-inp" id="mTelegram" placeholder="@username or number"/></div>
@@ -814,7 +814,7 @@ const PHONE_CODES=[
 {f:'🇯🇵',c:'+81',n:'Japan'},
 {f:'🇯🇪',c:'+44',n:'Jersey'},
 {f:'🇯🇴',c:'+962',n:'Jordan'},
-{f:'🇰🇿',c:'+76',n:'Kazakhstan'},
+{f:'🇰🇿',c:'+7',n:'Kazakhstan'},
 {f:'🇰🇪',c:'+254',n:'Kenya'},
 {f:'🇰🇮',c:'+686',n:'Kiribati'},
 {f:'🇽🇰',c:'+383',n:'Kosovo'},
@@ -881,7 +881,7 @@ const PHONE_CODES=[
 {f:'🇵🇷',c:'+1787',n:'Puerto Rico'},
 {f:'🇶🇦',c:'+974',n:'Qatar'},
 {f:'🇷🇴',c:'+40',n:'Romania'},
-{f:'🇷🇺',c:'+73',n:'Russia'},
+{f:'🇷🇺',c:'+7',n:'Russia'},
 {f:'🇷🇼',c:'+250',n:'Rwanda'},
 {f:'🇷🇪',c:'+262',n:'Réunion'},
 {f:'🇧🇱',c:'+590',n:'Saint Barthélemy'},
@@ -986,6 +986,32 @@ function selectPhoneCode(code,flag){
   el.value=code+(existing?' '+existing:'');
   document.getElementById('flagPickerDrop').style.display='none';
   detectNatFromPhone();
+}
+// Longest-matching dial code wins (+855 beats +8, +852 beats +86, etc).
+var PHONE_CODES_BY_LEN=PHONE_CODES.slice().sort(function(a,b){return b.c.length-a.c.length;});
+// A handful of codes are shared by more than one entry (dependencies,
+// uninhabited territories, etc). Where one side is overwhelmingly the
+// real-world common case, prefer it over whichever sorts first alphabetically
+// -- e.g. a real +44 number is the UK, not Guernsey. +1 (US/Canada) and +7
+// (Russia/Kazakhstan) are left unresolved on purpose: both sides are large
+// enough that there's no honest default, same as WhatsApp's own picker.
+var PREFERRED_FOR_SHARED_CODE={
+  '+44':'United Kingdom','+61':'Australia','+47':'Norway','+64':'New Zealand',
+  '+262':'Réunion','+590':'Guadeloupe','+599':'Curaçao','+500':'Falkland Islands',
+  '+268':'Eswatini','+7':'Russia'
+};
+function detectFlagFromPhone(){
+  var phone=(document.getElementById('mPhone').value||'').replace(/[\s\-().]/g,'');
+  if(!phone.startsWith('+'))return;
+  for(var i=0;i<PHONE_CODES_BY_LEN.length;i++){
+    var match=PHONE_CODES_BY_LEN[i];
+    if(phone.startsWith(match.c)){
+      var preferredName=PREFERRED_FOR_SHARED_CODE[match.c];
+      var preferred=preferredName&&preferredName!==match.n?PHONE_CODES.find(function(p){return p.c===match.c&&p.n===preferredName;}):null;
+      document.getElementById('flagBtnIcon').textContent=(preferred||match).f;
+      return;
+    }
+  }
 }
 document.addEventListener('click',function(e){
   var drop=document.getElementById('flagPickerDrop');
