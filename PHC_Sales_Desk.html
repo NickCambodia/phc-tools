@@ -1133,10 +1133,10 @@
       .card {
         background: #fff;
         border: 1px solid var(--bd);
-        border-radius: var(--r);
+        border-radius: 10px;
         padding: 16px;
         margin-bottom: 12px;
-        box-shadow: 0 1px 4px rgba(14, 30, 53, 0.05);
+        box-shadow: var(--sh);
       }
       @media (min-width: 600px) {
         .card {
@@ -11059,7 +11059,7 @@ B1 = East | Gross 50㎡ | Net 45㎡
             </tr></thead><tbody>`;
         rsData.schedule.forEach((row, i) => {
           const paid = row.paid;
-          const bg   = paid ? 'background:rgba(26,122,74,.08)' : row.isHandover ? 'background:rgba(200,164,90,.07)' : i % 2 === 0 ? 'background:#fff' : 'background:#faf8f4';
+          const bg   = paid ? 'background:rgba(26,122,74,.08)' : row.isHandover ? 'background:rgba(200,164,90,.07)' : i % 2 === 0 ? 'background:#fff' : 'background:var(--cream)';
           const fg   = paid ? 'color:var(--grn);font-weight:600' : row.isHandover ? 'color:var(--goldd);font-weight:600' : 'color:var(--tx)';
           html += `<tr style="${bg};border-bottom:1px solid var(--bd)">
             <td style="padding:8px 10px;text-align:center;color:var(--tx3);font-size:10px">${row.num}</td>
@@ -11199,7 +11199,7 @@ B1 = East | Gross 50㎡ | Net 45㎡
             <th style="padding:7px 10px;text-align:right;font-size:8.5px;letter-spacing:1px;text-transform:uppercase;color:var(--tx2)">Amount</th>
           </tr></thead><tbody>`;
         rows.forEach((r,i) => {
-          const bg = r.isHandover ? 'background:rgba(200,164,90,.06)' : i%2===0 ? 'background:#fff' : 'background:#faf8f4';
+          const bg = r.isHandover ? 'background:rgba(200,164,90,.06)' : i%2===0 ? 'background:#fff' : 'background:var(--cream)';
           const fg = r.isHandover ? 'color:var(--goldd);font-weight:600' : 'color:var(--tx)';
           h += `<tr style="${bg};border-bottom:1px solid var(--bd)">
             <td style="padding:7px 10px;text-align:center;color:var(--tx3)">${r.num}</td>
