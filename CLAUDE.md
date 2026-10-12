@@ -69,6 +69,7 @@ The website has its own CLAUDE.md at `~/Desktop/phc-website/CLAUDE.md`.
 | `PHC_AppsScript.gs` | ✅ Deployed | Google Apps Script (bound to PHC CRM sheet) — also contains the Payment Reminder Bot (@PHC_ClientCare_Bot) |
 | `PHC_ContentBot_AppsScript.gs` | ✅ Deployed | Google Apps Script (bound to PHC Content Queue sheet) — @PHC_Content_Bot |
 | `PHC_Bridge_Script.gs` | ✅ Done | Apps Script bound to lead inquiry sheet |
+| `PHC_Website_CRM_Bridge.md` | ✅ Done | Reference — how `propertyhubcambodia.lovable.app`'s inquiry form posts into the PHC CRM Leads tab (`submitInquiryToCrm()`, `W-` prefixed lead IDs) |
 | `docs/PHC_Telegram_Bots_Reference.html` | ✅ Done | Technical reference — both Telegram bots, architecture, Script Properties, gotchas |
 | `docs/PHC_Payment_Reminder_Bot.html` | ✅ Done | Reference — Payment Reminder Bot (@PHC_ClientCare_Bot) structure |
 | `docs/PHC_Bot_Decision_Map.html` | ✅ Done | Reference — how the Content Bot decides format/routing |
