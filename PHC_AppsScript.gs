@@ -541,7 +541,9 @@ function sendTelegramAlert(lead) {
   // match the moment the form is submitted — the client never clicked or
   // chose that specific property. Label it as a suggestion there, not a
   // request, so staff don't read it as something the client asked for.
-  const isSuggestedProperty = /\[Form: \/welcome Landing Page\]/.test(lead.notes || '');
+  // Not "suggested" once the visitor tapped "I'm interested in this one" —
+  // the website then adds "Selected: <project>." to the message.
+  const isSuggestedProperty = /\[Form: \/welcome Landing Page\]/.test(lead.notes || '') && !/Selected: /.test(lead.notes || '');
   const propertyLines = [
     (isSuggestedProperty ? 'Suggested Property: ' : 'Property: ') + escTg_(lead.interestedIn || '—'),
     'Budget: '   + escTg_(lead.budget   || '—'),
@@ -623,6 +625,35 @@ function parseInquiryType(lead) {
   return match ? match[1] : 'Property Inquiry';
 }
 
+// /welcome writes the visitor's answers as one sentence (buildBaseMessage in
+// phc-website/src/pages/LeadLanding.tsx):
+//   "Website inquiry: a rental yield property in Phnom Penh, budget $100K – $200K. ..."
+// Pull the goal and city back out for the client email. Fail-safe: if the
+// wording ever changes this just returns empty strings and the rows are
+// skipped — it can never break the email.
+const WELCOME_GOAL_LABEL = {
+  'rental yield':    'Rental yield',
+  'capital growth':  'Capital growth',
+  'home to live in': 'A home to live in'
+};
+const WELCOME_LABEL = {
+  en: { city: 'Location',      goal: 'Goal'        },
+  ja: { city: 'ご希望エリア',  goal: 'ご投資目的'  },
+  de: { city: 'Standort',      goal: 'Ziel'        },
+  kh: { city: 'ទីតាំង',         goal: 'គោលបំណង'     }
+};
+function parseWelcomeAnswers_(lead) {
+  const notes = String(lead.notes || '');
+  if (!/\[Form: \/welcome Landing Page\]/.test(notes)) return { goal: '', city: '' };
+  const m = notes.match(/Website inquiry:\s*an?\s+(?:(.+?)\s+)?property(?:\s+in\s+([^,.\n]+?))?\s*[,.]/i);
+  if (!m) return { goal: '', city: '' };
+  const rawGoal = (m[1] || '').trim().toLowerCase();
+  return {
+    goal: WELCOME_GOAL_LABEL[rawGoal] || '',
+    city: (m[2] || '').trim()
+  };
+}
+
 function buildWaLink(lead, scenario) {
   const prop = lead.interestedIn || '';
   let text;
@@ -693,8 +724,13 @@ function getClientCopyInner_(scenario, lang, lead, n, prop, cl, il, ctas) {
     // /welcome's matcher auto-fills this with its top match — the client
     // never clicked or chose it. Label and wording adjust so we're not
     // implying they asked about this specific property when they didn't.
-    const isSuggested = /\[Form: \/welcome Landing Page\]/.test(lead.notes || '');
+    const isSuggested = /\[Form: \/welcome Landing Page\]/.test(lead.notes || '') && !/Selected: /.test(lead.notes || '');
     const rows = [{ label: isSuggested ? (SUGGESTED_LABEL[lang] || 'Suggested Property') : cl.property, value: prop }];
+    // Mirror what the visitor answered on /welcome (location + goal).
+    const wa = parseWelcomeAnswers_(lead);
+    const wl = WELCOME_LABEL[lang] || WELCOME_LABEL.en;
+    if (wa.city)       rows.push({ label: wl.city,     value: escH(wa.city) });
+    if (wa.goal)       rows.push({ label: wl.goal,     value: escH(wa.goal) });
     if (lead.budget)   rows.push({ label: cl.budget,   value: escH(lead.budget) });
     if (lead.timeline) rows.push({ label: cl.timeline, value: escH(lead.timeline) });
     return {
@@ -877,7 +913,7 @@ function buildAgentEmailHtml(lead, scenario, lang) {
   // Same "suggested, not requested" distinction as the Telegram alert —
   // /welcome's matcher auto-fills this with its top match, the client
   // never explicitly chose it.
-  const isSuggestedProperty = /\[Form: \/welcome Landing Page\]/.test(lead.notes || '');
+  const isSuggestedProperty = /\[Form: \/welcome Landing Page\]/.test(lead.notes || '') && !/Selected: /.test(lead.notes || '');
   const rows = [
     ['Name',            escH(lead.fullName    || '—')],
     ['Phone/WhatsApp',  escH(lead.phone       || '—')],
