@@ -27,7 +27,6 @@ content-os/
 
 | Tool | Location | Status |
 |------|----------|--------|
-| PHC Content Machine (HTML) | `/PHC_Content_Machine.html` | ✅ Live |
 | PHC Content OS (Lovable) | https://phc-content-os.lovable.app/ | 🔄 In development |
 
 ---

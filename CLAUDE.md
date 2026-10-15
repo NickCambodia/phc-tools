@@ -54,6 +54,7 @@ The website has its own CLAUDE.md at `~/Desktop/phc-website/CLAUDE.md`.
 | `PHC_Lead_Tracker.html` | ✅ Live + Sheets | /phc-tools/PHC_Lead_Tracker.html |
 | `PHC_Sales_Desk.html` | ✅ Live | /phc-tools/PHC_Sales_Desk.html |
 | `PHC_Agent_Training_v3.html` | ✅ Live | /phc-tools/PHC_Agent_Training_v3.html |
+| `PHC_Agent_Training_v4.html` | 🚧 WIP, not linked | /phc-tools/PHC_Agent_Training_v4.html — in-progress step-by-step rebuild of v3 (new design system, plain-language rewrite). Not linked from `index.html` and not yet a replacement — v3 stays the live/linked tool until v4 is finished and swapped in. |
 | `PHC_Proposal_Generator.html` | ✅ Live | /phc-tools/PHC_Proposal_Generator.html |
 | `PHC_Client_Manager.html` | ✅ Live | /phc-tools/PHC_Client_Manager.html |
 | `PHC_Message_Builder.html` | ✅ Live | /phc-tools/PHC_Message_Builder.html |
@@ -70,7 +71,13 @@ The website has its own CLAUDE.md at `~/Desktop/phc-website/CLAUDE.md`.
 | `PHC_AppsScript.gs` | ✅ Deployed | Google Apps Script (bound to PHC CRM sheet) — also contains the Payment Reminder Bot (@PHC_ClientCare_Bot) |
 | `PHC_ContentBot_AppsScript.gs` | ✅ Deployed | Google Apps Script (bound to PHC Content Queue sheet) — @PHC_Content_Bot |
 | `PHC_Bridge_Script.gs` | ✅ Done | Apps Script bound to lead inquiry sheet |
+| `PHC_Website_CRM_Bridge.md` | ✅ Done | Reference — how `propertyhubcambodia.lovable.app`'s inquiry form posts into the PHC CRM Leads tab (`submitInquiryToCrm()`, `W-` prefixed lead IDs) |
 | `docs/PHC_Telegram_Bots_Reference.html` | ✅ Done | Technical reference — both Telegram bots, architecture, Script Properties, gotchas |
+| `docs/PHC_Payment_Reminder_Bot.html` | ✅ Done | Reference — Payment Reminder Bot (@PHC_ClientCare_Bot) structure |
+| `docs/PHC_Bot_Decision_Map.html` | ✅ Done | Reference — how the Content Bot decides format/routing |
+| `docs/PHC_Content_Distribution_Map.html` | ✅ Done | Reference — content & distribution progress map |
+| `docs/PHC_Broadcast_Comparison.html` | ✅ Done | Reference — comparing ways to broadcast messages to clients |
+| `docs/PHC_Buffer_Free_vs_Paid.html` | ✅ Done | Reference — Buffer free vs. paid plan comparison |
 
 ---
 
@@ -101,15 +108,24 @@ Every tool has an inline password gate (sessionStorage — clears when browser c
 `id, name, status, priority, category, due, assignees, memo, link, createdAt, updatedAt`
 
 **Leads** (Lead Tracker)
-`id, createdAt, updatedAt, fullName, nationality, phone, telegram, email, source, budget, timeline, interestedIn, stage, score, agent, notes, lastContact, followUpDate, followUpAction, activities, languages, unitType`
+`id, createdAt, updatedAt, fullName, nationality, phone, telegram, email, source, budget, timeline, interestedIn, stage, score, agent, notes, lastContact, followUpDate, followUpAction, activities, languages, unitType, referralPartner`
 
-> **Note:** `telegram` was added after the initial schema. Run `migrateLeadsSchema()` once in Apps Script to add this column to an existing Leads sheet without losing data. `languages` (free text, e.g. "EN, DE") and `unitType` (Studio/1BR/2BR/3BR/4BR+/Villa/Penthouse/Land/Commercial) were added 2026-09-11 the same way — no migration function was needed since both are plain new columns the Apps Script `insert`/`update` handlers pass through automatically via `Object.assign`.
+> **Note:** `telegram` was added after the initial schema. Run `migrateLeadsSchema()` once in Apps Script to add this column to an existing Leads sheet without losing data. `languages` (free text, e.g. "EN, DE") and `unitType` (Studio/1BR/2BR/3BR/4BR+/Villa/Penthouse/Land/Commercial) were added 2026-09-11 the same way — no migration function was needed since both are plain new columns the Apps Script `insert`/`update` handlers pass through automatically via `Object.assign`. `referralPartner` (Partners referral tracking) was added via `migrateLeadsSchemaForReferral()` — run once on an existing sheet.
 
 **Clients**
-`id, createdAt, updatedAt, name, nat, telegram, phone, project, unit, floor, bookingDate, spa, titleStatus, payDay, payAmount, payTotal, payMade, bank, status, notes`
+`id, createdAt, updatedAt, name, nat, telegram, phone, project, unit, floor, bookingDate, spa, titleStatus, payDay, payAmount, payTotal, payMade, bank, status, notes, referralPartner, channel, groupChatId, lastReminderSent`
+
+> **Note:** `referralPartner` was added via `migrateClientsSchemaForReferral()` (Partners referral tracking — carries a lead's referral attribution through to Client Manager). `channel` (`Telegram`/`WhatsApp`/`Other`), `groupChatId`, and `lastReminderSent` were added via `migrateClientsSchemaForReminders()` for the Payment Reminder Bot (@PHC_ClientCare_Bot) — see `PHC_AppsScript.gs`'s "PAYMENT REMINDER BOT" section for the one-time setup steps. Both are append-only migrations; run once each on an existing sheet if missing.
 
 **Deals** (Commission Tracker — run `initializeAll()` if tab missing)
-`id, createdAt, updatedAt, closedDate, clientName, project, unit, salePrice, commissionRate, commissionTotal, nickPct, monikaPct, rezaPct, nickAmt, monikaAmt, rezaAmt, agent, notes`
+`id, createdAt, updatedAt, closedDate, clientName, project, unit, salePrice, commissionRate, commissionTotal, referralPartner, partnerPct, partnerAmt, nickPct, monikaPct, rezaPct, nickAmt, monikaAmt, rezaAmt, agent, notes`
+
+> **Note:** `referralPartner`, `partnerPct`, `partnerAmt` (inserted immediately after `commissionTotal`) were added via `migrateDealsSchemaForReferral()` for Partners referral tracking — run once on an existing sheet if missing.
+
+**Partners** (registry of approved referral partners — added with the Partners referral tracking feature, run `initializeAll()` if tab missing)
+`id, createdAt, updatedAt, slug, displayName, ratePct, status, contactName, contactPhone, contactEmail, notes`
+
+> **Note:** A `?ref=` slug only counts as a real, credited partner if it has an `Approved` row here (checked server-side in `PHC_AppsScript.gs`) — an unrecognized or unapproved slug still shows up in alerts so staff aren't blind to it, but is clearly marked unverified rather than silently treated as legitimate. Read/written by Lead Tracker, Client Manager, and Commission Tracker via `?action=getAll&sheet=Partners`. Seed existing partners once with `seedInitialPartners()`.
 
 ---
 
@@ -125,6 +141,7 @@ GET  ?action=getAll&sheet=Tasks         → [ ...row objects ]
 GET  ?action=getAll&sheet=Leads         → [ ...row objects ]
 GET  ?action=getAll&sheet=Clients       → [ ...row objects ]
 GET  ?action=getAll&sheet=Deals         → [ ...row objects ]
+GET  ?action=getAll&sheet=Partners      → [ ...row objects ]
 
 POST { action: "insert", sheet: "Leads", data: { id, ... } }      → { success: true, id }
 POST { action: "update", sheet: "Clients", id: "...", data: {} }   → { success: true }
@@ -571,7 +588,7 @@ These rules apply to every tool in this repo. Do not override without explicit i
 - **Mobile responsive is non-negotiable** — test every new UI at 390px width before finishing.
 - **Don't change the Apps Script web app URL** — it's baked into every tool. If redeploying, update CLAUDE.md first.
 - **Don't change password values** — only Nick decides if passwords change.
-- **Don't add new tabs to PHC CRM sheet** — the 4-tab schema (Tasks, Leads, Clients, Deals) is fixed. New data types need discussion first.
+- **Don't add new tabs to PHC CRM sheet** — the 5-tab schema (Tasks, Leads, Clients, Deals, Partners) is fixed. New data types need discussion first.
 
 ### Before starting any tool task, confirm:
 1. Which file are we editing? (Get the exact filename from the File Inventory above.)
@@ -614,3 +631,4 @@ Fonts: **DM Sans** (UI) · **DM Serif Display** (hero only) · **DM Mono** (labe
 | 2026-09-11 | PopDeal-parity work rejected Lead Pool and Daily Quota as features | Lead Tracker's existing `autoAssign()` (nationality-based routing, load-balance fallback) already solves what PopDeal's Lead Pool solves, better — a first-come claim queue would be a regression, not an upgrade. Full gap analysis lives in two artifacts published that session (not in this repo). |
 | 2026-09-11/12 | This Mac's local `main` had drifted 40 commits behind origin (last real sync predates 2026-08-06) | Root cause: git credentials broke in a Mac reset, silently blocking pushes/pulls for weeks. Merged clean — 1 real conflict (favicon/logo, both sides independently fixed the same placeholder-logo problem; kept origin's version since it was already consistent across 10+ tools). **If you're reading this from a session on the PC or another machine: check `git fetch && git log --oneline HEAD..origin/main` before assuming your checkout is current — this can recur.** |
 | 2026-09-12 | Dropped ~86 of ~88 files of stale uncommitted local state found on this Mac (stashed first via `git stash push -u`, never force-discarded) | Verified file-by-file: pre-rebuild snapshots of files the 40 merged commits had already substantially reworked (Message Builder, Commission Tracker, Sales Desk, etc.), or literally empty stub files. **2 files were genuine unrecovered work and are still sitting in `stash@{0}` as of this writing, not yet applied:** (1) `PHC_ContentBot_AppsScript.gs` — a price-drop "repost as new message" feature, dated 2026-08-25, explicitly because Nick disliked the old edit-in-place banner behavior; this is a live deployed script, recovering it means redeploying too. (2) `content-os/docs/ROADMAP.md` — an "Analytics-Driven Content Sourcing" initiative section dated 2026-09-03, newer than HEAD's June 2026 version. Ask Nick before touching `stash@{0}` — don't assume it's safe to drop wholesale just because most of it was. |
+| 2026-10-02 | Documented the `Partners` sheet tab (added earlier with the Partners referral tracking feature, commit `894f900`) in the GOOGLE SHEETS DATABASE and APPS SCRIPT API sections, and corrected the "4-tab schema is fixed" guardrail to 5 tabs | Routine audit found `PHC_AppsScript.gs` and three live tools (Lead Tracker, Client Manager, Commission Tracker) already reading/writing a `Partners` tab that CLAUDE.md never mentioned — documentation-only fix, no code changed. |
