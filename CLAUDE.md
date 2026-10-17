@@ -1,5 +1,7 @@
 # CLAUDE.md — Property Hub Cambodia (PHC) Internal OS
 
+> **Before changing anything, follow `~/Desktop/phc-website/docs/HANDOFF_CHECKLIST.md`** (it lives in the website repo and covers both) — which tasks need the strongest model (Apps Script, lead capture and secrets are Red), how to verify (syntax-check, `node --check` on Apps Script copies), and how to commit and hand off safely. If you can only see this repo, ask Nick for a copy.
+
 ## SESSION MEMORY
 
 Persistent context for Nick's Cowork sessions is stored in `claude-memory/`. At the start of any new session, read `claude-memory/MEMORY.md` to load full context — video workflow, content system, style rules, and file references.
