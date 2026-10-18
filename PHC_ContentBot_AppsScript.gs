@@ -198,7 +198,7 @@ function pollTelegramOnce(timeoutSeconds) {
     const g = mediaGroups[gid];
     // Telegram can deliver one album in two batches. If the caption (#unit) came in an earlier batch,
     // these captionless photos belong to that draft: add them quietly, never run the listing flow on them.
-    if (!g.captionText && unitAddLateAlbumPhotos(g.chatId, gid, g.imageIds)) return;
+    if (!g.captionText && unitAddLateAlbumPhotos(g.chatId, gid, g.imageIds, g.photoIds)) return;
     try { handleIncomingMessage(g.chatId, g.captionText, g.photoIds, g.isForwarded, g.sourceUsername, g.captionEntities, g.imageIds, gid); }
     catch (err) { Logger.log('handleIncomingMessage(group) error: ' + err); }
   });
@@ -297,10 +297,16 @@ function getMessageEntities(m) {
 function handleIncomingMessage(chatId, text, photoFileIds, isForwarded, sourceUsername, originalEntities, imageFileIds, mediaGroupId) {
   if (String(chatId) !== REVIEWER_CHAT_ID) return; // only from you, in your private chat with the bot
 
-  // Unit intake (see the UNIT INTAKE section at the bottom): only messages tagged #unit or /unit,
-  // plus the plain-text reply that names a new building. Everything else continues below unchanged.
-  if (isUnitIntakeText(text)) { handleUnitIntake(chatId, text, imageFileIds && imageFileIds.length ? imageFileIds : (photoFileIds || []), mediaGroupId); return; }
-  if (isAwaitingUnitName(chatId, text, isForwarded)) { handleUnitNameReply(chatId, text); return; }
+  // The menu "What should I do with this post?" (see UNIT INTAKE at the bottom). It handles typed answers,
+  // #unit posts, and anything with photos or that looks like a listing. Plain chat falls through, silent as before.
+  if (routeIncoming(chatId, text, photoFileIds, isForwarded, sourceUsername, originalEntities, imageFileIds, mediaGroupId)) return;
+  processChannelListing(chatId, text, photoFileIds, isForwarded, sourceUsername, originalEntities);
+}
+
+// The original listing flow (forward or paste a listing, EN/JP/RU/DE versions, your approval, then post).
+// pageUrl and refCode are only given by the "Both" route, to add the live page link and reference to each post.
+function processChannelListing(chatId, text, photoFileIds, isForwarded, sourceUsername, originalEntities, pageUrl, refCode) {
+  if (String(chatId) !== REVIEWER_CHAT_ID) return; // only from you, in your private chat with the bot
 
   // Anything forwarded straight from your own channel is trusted outright —
   // no hashtag/shape check at all. It's not always a single-property listing
@@ -401,6 +407,7 @@ function handleIncomingMessage(chatId, text, photoFileIds, isForwarded, sourceUs
     // entities were already silently stripped by Telegram for a non-Premium
     // bot account regardless — see known limitation in memory — so this
     // preserves nothing that was actually working.)
+    if (pageUrl) content = addPageLink(content, pageUrl, refCode);
     const rowEntities = '';
 
     const rowNum = sheet.getLastRow() + 1;
@@ -805,8 +812,12 @@ function handleCallback(cb) {
   const id = sepIdx === -1 ? '' : data.slice(sepIdx + 1);
   Logger.log('handleCallback: raw data="' + data + '" action="' + action + '" id="' + id + '"');
 
+  if (action === 'menu') {
+    handleMenuCallback(cb, id); // the "What should I do with this post?" buttons (callback_data "menu_<id>_<verb>")
+    return;
+  }
   if (action === 'unit') {
-    handleUnitCallback(cb, id); // buttons of the unit intake (callback_data "unit_<draftId>_<verb>")
+    handleUnitCallback(cb, id); // buttons of the website draft (callback_data "unit_<draftId>_<verb>")
     return;
   }
   if (action === 'approveAll' || action === 'rejectAll') {
@@ -1507,17 +1518,19 @@ function onOpen() {
 // ═══════════════════════════════════════════════════════════════
 //  UNIT INTAKE — Telegram → hidden draft page on the website
 //
-//  You send ONE message in your private chat with this bot:
-//    photos (as photos or as files) + a caption containing #unit, e.g.
-//    "#unit 2 bedroom, floor 14, 85 sqm, $185,000 https://youtu.be/xxxxxxxxxxx"
-//  The bot asks which building, shows a summary with a facilities
-//  tick-list, then (on "Create draft page") uploads the photos and
-//  creates a HIDDEN draft unit on propertyhubcambodia.com. It replies
-//  with a private preview link. Nothing is public until you log in to
-//  the website as admin and tap "Publish Unit Live" on that page.
-//
-//  Messages WITHOUT #unit keep flowing through the normal listing
-//  flow above, untouched.
+//  You send a post (photos plus your usual listing format, or a short caption
+//  like "#unit 2 bedroom, floor 14, 85 sqm, $185,000"), or forward one.
+//  The bot asks ONE question: "What should I do with this post?"
+//    Website draft    reads the post, asks only for what is missing, then creates
+//                     a HIDDEN draft unit on propertyhubcambodia.com
+//    Post to channels the existing flow: EN/JP/RU/DE versions for your approval
+//    Both             the draft first; the channel posts come after the page is
+//                     live, with its link and reference code
+//    Ignore           nothing happens
+//  A message with #unit (or #web, or /unit) skips the question and goes straight
+//  to the website draft. Plain chat with no photos gets no menu.
+//  Nothing is public until you log in to the website as admin and tap
+//  "Publish Unit Live", then Confirm.
 //
 //  Script Properties needed (Project Settings → Script Properties):
 //    BOT_TOKEN           (already set)
@@ -1544,7 +1557,7 @@ const UNIT_FACILITIES = [
 ];
 
 function isUnitIntakeText(text) {
-  return /(^|\s)(#unit|\/unit)(?![A-Za-z0-9_])/i.test(String(text || ''));
+  return /(^|\s)(#unit|#web|\/unit)(?![A-Za-z0-9_])/i.test(String(text || ''));
 }
 
 // Largest photo, OR an image sent "as a file" (document). Used only by the unit intake;
@@ -1564,7 +1577,7 @@ function getImageFileId(m) {
 // PHC uses sqm only: a size given in square feet is NOT converted, it is flagged.
 function parseUnitText(text) {
   const out = { price: null, bedrooms: null, bathrooms: null, sqm: null, floor: null, unitNumber: null, video: null, listingType: 'resale', usedSqft: false };
-  let t = String(text || '').replace(/#unit(?![A-Za-z0-9_])/ig, ' ').replace(/(^|\s)\/unit(?![A-Za-z0-9_])/ig, ' ');
+  let t = String(text || '').replace(/#(?:unit|web)(?![A-Za-z0-9_])/ig, ' ').replace(/(^|\s)\/unit(?![A-Za-z0-9_])/ig, ' ');
 
   const yt = t.match(/(?:https?:\/\/)?(?:www\.|m\.)?(?:youtube\.com\/(?:watch\?(?:[^\s]*&)?v=|shorts\/|embed\/)|youtu\.be\/)([A-Za-z0-9_-]{11})/i);
   if (yt) out.video = 'https://www.youtube.com/watch?v=' + yt[1];
@@ -1648,16 +1661,18 @@ function callIntake(payload) {
   return { code: resp.getResponseCode(), body: body };
 }
 
+
 function dryRunIntake(payload) {
   if (payload.action === 'prepare') {
-    const title = (payload.buildingName || 'Linked project') + ' · ' + (payload.bedrooms <= 0 ? 'Studio' : payload.bedrooms + ' Bedroom') + (payload.floor ? ' · Floor ' + payload.floor : '');
+    const rooms = payload.bedrooms === null || payload.bedrooms === undefined ? '' : ' · ' + (payload.bedrooms <= 0 ? 'Studio' : payload.bedrooms + ' Bedroom');
+    const title = (payload.buildingName || 'Linked project') + rooms + (payload.floor ? ' · Floor ' + payload.floor : '');
     return { code: 200, body: { ok: true, title: title, slug: 'dry-run-' + Utilities.getUuid().slice(0, 4) } };
   }
   if (payload.action === 'photos') {
     return { code: 200, body: { ok: true, urls: payload.fileIds.map(function (f, i) { return 'dry-run-photo-' + (payload.startIndex + i + 1); }) } };
   }
   if (payload.action === 'create') {
-    return { code: 200, body: { ok: true, id: 0, slug: 'dry-run', previewUrl: 'DRY RUN (no page was created)' } };
+    return { code: 200, body: { ok: true, id: 0, slug: 'dry-run', refCode: 'DRY-RUN', previewUrl: 'DRY RUN (no page was created)' } };
   }
   return { code: 200, body: { ok: true, removed: 0 } };
 }
@@ -1689,61 +1704,421 @@ function describeIntakeFailure(res, what) {
   return 'The website could not ' + what + ' (' + (b.error || 'HTTP ' + res.code) + ').';
 }
 
-// ── Step 1: the #unit message arrives ───────────────────────────────
+// ── Reading your Telegram post format ───────────────────────────────
+//
+//  Reads the same template you already post, e.g.
+//    #ForSale $35,000 / RESIDENCE L | 1BR UNIT / 📍 Boeung Tumpun, Phnom Penh /
+//    UNIT DETAILS (✅ bullets) / FACILITIES (✅ bullets) / contact block
+//  and fills in everything it can find. Anything it cannot find is asked for later, or left for you to
+//  review on the draft page. The contact block is always ignored.
 
-function handleUnitIntake(chatId, text, imageFileIds, mediaGroupId) {
+const UNIT_TYPES = ['Condo', 'Apartment', 'Villa / House', 'Commercial', 'Land', 'Serviced Residence'];
+const UNIT_AREAS = ['BKK1', 'BKK3', 'Toul Kork', 'Tonle Bassac', 'Daun Penh', 'Other'];
+const UNIT_CITIES = { 'phnom penh': 'Phnom Penh', 'siem reap': 'Siem Reap', 'sihanoukville': 'Sihanoukville', 'preah sihanouk': 'Sihanoukville', 'kampot': 'Kampot', 'kep': 'Kep', 'battambang': 'Battambang', 'kandal': 'Kandal' };
+
+// "RESIDENCE L" -> "Residence L". Mixed-case names are kept as typed.
+function titleCaseBuilding(name) {
+  const n = String(name || '').replace(/\s+/g, ' ').trim();
+  if (n !== n.toUpperCase()) return n;
+  return n.toLowerCase().split(' ').map(function (w) {
+    if (/\d/.test(w) || w.length <= 2) return w.toUpperCase();
+    return w.charAt(0).toUpperCase() + w.slice(1);
+  }).join(' ');
+}
+
+function formatUsd(n) {
+  return '$' + String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+}
+
+// Property type from words in the title or a short caption. Never from facility bullets
+// ("office", "retail", "coffee shop" there must not turn a condo into a commercial unit).
+function guessUnitType(text) {
+  const t = String(text || '');
+  // The specific word wins over the generic one ("BOREY | SHOPHOUSE" is a shophouse).
+  if (/\b(shop\s?house|shophouse|office|retail|warehouse|commercial)\b/i.test(t)) return 'Commercial';
+  if (/\b(land|plot|hectare)\b/i.test(t)) return 'Land';
+  if (/\b(villa|town\s?house|twin villa|link house|flat house|borey)\b/i.test(t)) return 'Villa / House';
+  if (/\b(serviced|hotel|grr)\b/i.test(t)) return 'Serviced Residence';
+  if (/\bapartment\b/i.test(t)) return 'Apartment';
+  if (/\bcondo(minium)?\b/i.test(t)) return 'Condo';
+  return null;
+}
+
+function readPriceLine(line, out) {
+  const arrow = line.match(/\$\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s*(?:→|->|=>|➡️?|➜|to)\s*\$\s*([0-9][0-9,]*(?:\.[0-9]+)?)/i);
+  if (arrow) {
+    const from = Math.round(parseFloat(arrow[1].replace(/,/g, '')));
+    const to = Math.round(parseFloat(arrow[2].replace(/,/g, '')));
+    out.priceChange = { from: from, to: to };
+    out.price = to;
+  } else {
+    const m = line.match(/\$\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s*([kKmM])?/);
+    if (m && out.price === null) {
+      let p = parseFloat(m[1].replace(/,/g, ''));
+      const mult = (m[2] || '').toLowerCase();
+      if (mult === 'k') p *= 1000;
+      if (mult === 'm') p *= 1000000;
+      if (p > 0) out.price = Math.round(p);
+    }
+  }
+  if (/\/\s*month|per\s+month|#ForRent|\brental\b|for\s+rent/i.test(line)) out.listingType = 'rent';
+  else if (/#ForSale|selling price|for\s+sale|\bresale\b/i.test(line) && out.listingType === null) out.listingType = 'resale';
+}
+
+function addUnitFeature(out, text) {
+  const t = String(text || '').replace(/\s+/g, ' ').trim().slice(0, 100);
+  if (!t) return;
+  const low = t.toLowerCase();
+  for (let i = 0; i < out.extraFeatures.length; i++) { if (out.extraFeatures[i].toLowerCase() === low) return; }
+  if (out.extraFeatures.length < 30) out.extraFeatures.push(t);
+}
+
+// One piece of a details bullet (bullets can hold several pieces separated by "|").
+// Returns true when the piece was a structured fact; false means it is a plain feature.
+function applyDetailSegment(seg, out) {
+  let m;
+  if ((m = seg.match(/^unit\s*(?:no\.?|number|#)?\s*[:#-]?\s*([A-Za-z0-9][A-Za-z0-9\-]{0,11})$/i)) && /\d/.test(m[1])) { out.unitNumber = m[1].toUpperCase(); return true; }
+  if ((m = seg.match(/^(?:([0-9]{1,3})(?:st|nd|rd|th)?\s*floor|floor\s*[:#]?\s*([0-9]{1,3}|G))$/i))) { out.floor = String(m[1] || m[2]).toUpperCase(); return true; }
+  if (/^studio$/i.test(seg)) { out.bedrooms = 0; return true; }
+  if ((m = seg.match(/^([0-9]+)\s*[- ]?(?:bed(?:room)?s?|br)\b/i))) { out.bedrooms = parseInt(m[1], 10); return true; }
+  if ((m = seg.match(/^([0-9]+)\s*[- ]?bath(?:room)?s?\b/i))) { out.bathrooms = parseInt(m[1], 10); return true; }
+  if ((m = seg.match(/^([0-9]+(?:[.,][0-9]+)?)\s*(?:㎡|m²|m2|sqm|sq\.?\s?m)\s*(gross|net)?$/i))) {
+    const v = Math.round(parseFloat(m[1].replace(',', '.')));
+    const kind = (m[2] || '').toLowerCase();
+    if (kind === 'gross') out.grossSqm = v; else if (kind === 'net') out.netSqm = v; else out.sqm = v;
+    return true;
+  }
+  if (/^[0-9]+(?:[.,][0-9]+)?\s*(?:sqft|sq\.?\s?ft|square\s*feet|ft2)\b/i.test(seg)) { out.usedSqft = true; return true; }
+  return false;
+}
+
+function parseTelegramPost(text) {
+  const out = {
+    found: false, buildingName: null, bedrooms: null, bathrooms: null, grossSqm: null, netSqm: null, sqm: null,
+    floor: null, unitNumber: null, price: null, priceChange: null, listingType: null,
+    locationText: null, city: null, extraFeatures: [], propertyType: null, usedSqft: false,
+  };
+  const plain = fromBoldSansSerif(String(text || ''));
+  const lines = plain.split('\n').map(function (l) { return l.trim(); });
+  const contactRe = /t\.me\/|wa\.me\/|whatsapp|telegram|@\w+|https?:\/\/|www\.|^(?:📞|📱|☎|✆|📧|✉|🏠|🌐|🔗|🏷)/iu;
+  const bulletRe = /^(?:✅|✓|✔️?|☑️?|•|●|▪️?|■|★|➡️?|⁃|-)\s*/u;
+  let section = '';
+  let titleText = '';
+  let titleDone = false;
+  let bulletCount = 0;
+
+  lines.forEach(function (line) {
+    if (!line) return;
+    if (/^[―\-_=⎯—]{3,}$/.test(line)) return;
+    if (contactRe.test(line)) return;
+
+    if (/^(?:unit details|details|facilities|features|amenities|utilities)\s*:?$/i.test(line)) { section = line.toLowerCase().replace(/\s*:\s*$/, ''); return; }
+
+    if (/#ForSale|#ForRent|#NewProject/i.test(line) || /^💰/u.test(line) || (/\b(price|rent)\b/i.test(line) && /\$/.test(line))) {
+      readPriceLine(line, out);
+      titleText += ' ' + line.replace(/\$[0-9,.]+/g, '');
+      out.found = true;
+      return;
+    }
+
+    if (/^📍/u.test(line)) {
+      const loc = line.replace(/^📍\s*/u, '').trim();
+      const parts = loc.split(',').map(function (s) { return s.trim(); }).filter(Boolean);
+      const last = parts.length ? parts[parts.length - 1].toLowerCase() : '';
+      if (UNIT_CITIES[last]) { out.city = UNIT_CITIES[last]; parts.pop(); }
+      out.locationText = parts.length ? parts.join(', ') : null;
+      out.found = true;
+      return;
+    }
+
+    const bm = line.match(bulletRe);
+    if (bm) {
+      bulletCount++;
+      out.found = true;
+      const content = line.slice(bm[0].length).trim();
+      if (!content) return;
+      if (/^(?:facilities|features|amenities|utilities)/.test(section)) { addUnitFeature(out, content); return; }
+      content.split('|').map(function (s) { return s.trim(); }).filter(Boolean).forEach(function (seg) {
+        if (!applyDetailSegment(seg, out)) addUnitFeature(out, seg);
+      });
+      return;
+    }
+
+    // The title line, "BUILDING | 1BR UNIT": only trusted when it has a "|".
+    if (!titleDone && line.indexOf('|') !== -1) {
+      titleDone = true;
+      out.found = true;
+      const parts = line.split('|');
+      out.buildingName = titleCaseBuilding(parts[0]);
+      const rest = parts.slice(1).join(' ');
+      titleText += ' ' + rest;
+      let m;
+      if (/\bstudio\b/i.test(rest)) out.bedrooms = 0;
+      else if ((m = rest.match(/([0-9]+)\s*[- ]?(?:br|bed(?:room)?s?)\b/i))) out.bedrooms = parseInt(m[1], 10);
+      if (/for\s+rent|\brental\b/i.test(rest)) out.listingType = 'rent';
+      else if (/\bresale\b|for\s+sale/i.test(rest) && out.listingType === null) out.listingType = 'resale';
+    }
+  });
+
+  out.sqm = out.grossSqm !== null ? out.grossSqm : (out.sqm !== null ? out.sqm : out.netSqm);
+  if (out.grossSqm !== null && out.netSqm !== null) addUnitFeature(out, 'Net area ' + out.netSqm + ' sqm');
+  out.propertyType = guessUnitType(titleText);
+  if (bulletCount === 0 && !out.buildingName && out.price === null) out.found = false;
+  return out;
+}
+
+// Short caption and full post, merged. The full post wins where it has an answer.
+function parseUnitFacts(text) {
+  const base = parseUnitText(text);
+  const full = parseTelegramPost(text);
+  const facts = Object.assign({}, base);
+  ['price', 'bedrooms', 'bathrooms', 'floor', 'unitNumber', 'listingType'].forEach(function (k) {
+    if (full[k] !== null && full[k] !== undefined) facts[k] = full[k];
+  });
+  if (full.sqm !== null) facts.sqm = full.sqm;
+  facts.usedSqft = !!(base.usedSqft || full.usedSqft);
+  facts.buildingName = full.buildingName;
+  facts.locationText = full.locationText;
+  facts.city = full.city;
+  facts.extraFeatures = full.extraFeatures;
+  facts.priceChange = full.priceChange;
+  facts.isFullPost = full.found;
+  facts.propertyType = full.propertyType || (full.found ? null : guessUnitType(text));
+  return facts;
+}
+
+// A building name from a post matched to an active project on the website.
+function matchUnitProject(name, projects) {
+  const norm = function (s) { return String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ''); };
+  const n = norm(name);
+  if (!n) return null;
+  let hit = null;
+  (projects || []).forEach(function (p) { if (!hit && norm(p.title) === n) hit = p; });
+  if (hit) return hit;
+  const loose = (projects || []).filter(function (p) {
+    const pn = norm(p.title);
+    return n.length >= 5 && pn.length >= 5 && (pn.indexOf(n) !== -1 || n.indexOf(pn) !== -1);
+  });
+  return loose.length === 1 ? loose[0] : null;
+}
+
+// ── The menu: what should the bot do with this post? ────────────────
+
+function looksLikeListingText(text) {
+  const t = String(text || '');
+  if (!t.trim()) return false;
+  return /#ForSale|#ForRent|#NewProject/i.test(t) || /\[\s*for\s+(sale|rent)\s*\]/i.test(t) ||
+    (/[一-鿿]/.test(t) && /\$[\d,]+/.test(t)) || hasListingVocabulary(t) || parseTelegramPost(t).found;
+}
+
+function menuCache(id) { return 'unitmenu_' + id; }
+function loadUnitMenu(id) { const raw = unitCache().get(menuCache(id)); return raw ? JSON.parse(raw) : null; }
+function saveUnitMenu(m) { unitCache().put(menuCache(m.id), JSON.stringify(m), UNIT_CACHE_SECONDS); }
+
+// Returns true when it handled the message (so the old listing flow must not also run on it).
+function routeIncoming(chatId, text, photoFileIds, isForwarded, sourceUsername, originalEntities, imageFileIds, mediaGroupId) {
+  chatId = String(chatId);
+  text = String(text || '');
+  let images = (imageFileIds && imageFileIds.length ? imageFileIds : (photoFileIds || [])).slice(0, UNIT_MAX_PHOTOS);
+  let photoIds = (photoFileIds || []).slice(0, UNIT_MAX_PHOTOS);
+  const orig = { text: text, photoIds: photoIds, isForwarded: !!isForwarded, sourceUsername: sourceUsername || null, entities: originalEntities || null };
+
+  // 1. a typed answer to "What is the building called?" or "Which area?"
+  if (isAwaitingUnitText(chatId, text, isForwarded)) { handleUnitTextReply(chatId, text); return true; }
+
+  // 2. the tag skips the question: straight to a website draft
+  if (isUnitIntakeText(text)) { startWebsiteDraft(chatId, text, images, mediaGroupId, orig, 'site'); return true; }
+
+  // 3. photos sent earlier without any text, now followed by the post text
+  //    (a post longer than Telegram's 1,024 character caption limit has to go as a separate message)
+  const pendingRaw = unitCache().get('unitpending_' + chatId);
+  const pending = pendingRaw ? JSON.parse(pendingRaw) : null;
+  if (pending && !images.length && looksLikeListingText(text)) {
+    images = pending.images; photoIds = pending.photoIds; orig.photoIds = photoIds;
+    unitCache().remove('unitpending_' + chatId);
+    askRouteMenu(chatId, orig, images, mediaGroupId);
+    return true;
+  }
+
+  // 4. photos with no text at all: keep them and wait for the text
+  if (images.length && !text.trim() && !isForwarded) {
+    const all = pending ? { images: pending.images.concat(images), photoIds: pending.photoIds.concat(photoIds) } : { images: images, photoIds: photoIds };
+    all.images = all.images.slice(0, UNIT_MAX_PHOTOS); all.photoIds = all.photoIds.slice(0, UNIT_MAX_PHOTOS);
+    unitCache().put('unitpending_' + chatId, JSON.stringify(all), 600);
+    unitSessionTouch();
+    sendTelegramMessage(chatId, 'Got ' + all.images.length + ' photo' + (all.images.length === 1 ? '' : 's') + '. Now send the post text (within 10 minutes) and I will ask what to do with it. You can also add #unit to a caption to go straight to a website draft.');
+    return true;
+  }
+
+  // 5. anything that looks like a listing, or carries photos, or was forwarded: ask
+  if (images.length || isForwarded || looksLikeListingText(text)) { askRouteMenu(chatId, orig, images, mediaGroupId); return true; }
+
+  return false; // plain chat: the old behaviour (silent)
+}
+
+function askRouteMenu(chatId, orig, images, mediaGroupId) {
+  const m = { id: newUnitDraftId(), orig: orig, images: images, mediaGroupId: mediaGroupId || null, used: null };
+  saveUnitMenu(m);
+  if (mediaGroupId) unitCache().put('unitgroup_' + mediaGroupId, 'menu:' + m.id, UNIT_CACHE_SECONDS);
+  unitSessionTouch();
+  const f = parseUnitFacts(orig.text);
+  const bits = [];
+  if (f.buildingName) bits.push(f.buildingName);
+  if (f.bedrooms !== null) bits.push(f.bedrooms === 0 ? 'studio' : f.bedrooms + ' bedroom');
+  if (f.price !== null) bits.push(formatUsd(f.price));
+  const rows = [[
+    { text: 'Website draft', callback_data: 'menu_' + m.id + '_site' },
+    { text: 'Post to channels', callback_data: 'menu_' + m.id + '_chan' },
+  ], [
+    { text: 'Both', callback_data: 'menu_' + m.id + '_both' },
+    { text: 'Ignore', callback_data: 'menu_' + m.id + '_ign' },
+  ]];
+  sendTelegramMessage(chatId,
+    'What should I do with this post?' + (bits.length ? '\n' + bits.join(', ') : '') + (images.length ? '\n' + images.length + ' photo' + (images.length === 1 ? '' : 's') : ''),
+    { inline_keyboard: rows });
+}
+
+function handleMenuCallback(cb, rest) {
+  const chatId = cb.message && cb.message.chat ? String(cb.message.chat.id) : '';
+  if (chatId !== REVIEWER_CHAT_ID) { answerCallback(cb.id, 'Not allowed.'); return; }
+  const parts = String(rest).split('_');
+  const id = parts[0], verb = parts[1];
+  const m = loadUnitMenu(id);
+  const messageId = cb.message.message_id;
+  if (!m) { answerCallback(cb.id, 'This question expired. Send the post again.'); return; }
+  if (m.used) { answerCallback(cb.id, 'Already handled.'); return; }
+  unitSessionTouch();
+  if (verb === 'ign') {
+    m.used = 'ign'; saveUnitMenu(m);
+    answerCallback(cb.id, 'Ignored.');
+    editUnitMessage(chatId, messageId, 'Ignored. Nothing was done.', null);
+    return;
+  }
+  if (verb === 'chan') {
+    m.used = 'chan'; saveUnitMenu(m);
+    answerCallback(cb.id, 'Preparing the channel posts...');
+    editUnitMessage(chatId, messageId, 'Posting to channels: preparing the EN, JP, RU and DE versions for your approval.', null);
+    processChannelListing(chatId, m.orig.text, m.orig.photoIds, m.orig.isForwarded, m.orig.sourceUsername, m.orig.entities);
+    return;
+  }
+  if (verb === 'site' || verb === 'both') {
+    m.used = verb; saveUnitMenu(m);
+    answerCallback(cb.id, verb === 'both' ? 'Website draft first, channels after.' : 'Starting the website draft.');
+    editUnitMessage(chatId, messageId, verb === 'both' ? 'Both: starting the website draft. The channel posts come after the page is live.' : 'Starting the website draft.', null);
+    startWebsiteDraft(chatId, m.orig.text, m.images, m.mediaGroupId, m.orig, verb);
+    return;
+  }
+  answerCallback(cb.id, '');
+}
+
+// ── Step 1: start a website draft from a post ───────────────────────
+
+function startWebsiteDraft(chatId, text, imageFileIds, mediaGroupId, orig, route) {
   chatId = String(chatId); // Telegram only accepts the chat id as text from Apps Script (a Number goes out as "3.5E8" and fails with "chat not found")
-  const facts = parseUnitText(text);
+  const facts = parseUnitFacts(text);
   const images = (imageFileIds || []).slice(0, UNIT_MAX_PHOTOS);
   const problems = [];
-  if (!images.length) problems.push('at least one photo (send the photos with the #unit text as the caption)');
   if (facts.price === null) problems.push('a price, like $185,000');
-  if (facts.bedrooms === null) problems.push('the bedrooms, like "2 bedroom" or "studio"');
   if (facts.usedSqft) problems.push('the size in sqm (we use sqm only, I do not convert feet)');
   if (problems.length) {
     sendTelegramMessage(chatId,
-      'I need a few things before I can start a draft:\n- ' + problems.join('\n- ') +
-      '\n\nExample caption:\n#unit 2 bedroom, floor 14, 85 sqm, $185,000\n\nSend the photos again with a corrected caption.');
+      'I need this before I can start a draft:\n- ' + problems.join('\n- ') +
+      '\n\nExample: #unit 2 bedroom, floor 14, 85 sqm, $185,000\nSend the post again with that fixed.');
     return;
   }
   const d = {
-    id: newUnitDraftId(), step: 'building', facts: facts, images: images,
-    parentId: null, buildingName: null, title: null, features: [], messageId: null,
+    id: newUnitDraftId(), step: 'building', route: route || 'site', facts: facts, images: images, orig: orig || null,
+    parentId: null, buildingName: facts.buildingName || null, title: null, features: [], extraFeatures: facts.extraFeatures || [],
+    propertyType: facts.propertyType || null, typeAssumed: false, location: facts.locationText || null, city: facts.city || null,
+    messageId: null, created: null,
   };
+  if (d.buildingName) {
+    const hit = matchUnitProject(d.buildingName, fetchUnitProjects());
+    if (hit) { d.parentId = hit.id; d.buildingName = hit.title; d.location = null; d.city = null; }
+  }
   saveUnitDraft(d);
-  if (mediaGroupId) unitCache().put('unitgroup_' + mediaGroupId, d.id, UNIT_CACHE_SECONDS); // so a late photo of this album can still join
+  if (mediaGroupId) unitCache().put('unitgroup_' + mediaGroupId, 'draft:' + d.id, UNIT_CACHE_SECONDS); // so a late photo of this album can still join
   unitSessionTouch();
-  sendTelegramMessage(chatId,
-    'Got ' + images.length + ' photo' + (images.length === 1 ? '' : 's') + (facts.video ? ' and a video link' : '') + '. Is this building already on the website?',
+  advanceUnitDraft(chatId, d, null);
+}
+
+// Works out the next missing piece and asks for it; when nothing is missing, shows the summary.
+function advanceUnitDraft(chatId, d, messageId) {
+  if (!d.buildingName) { d.step = 'building'; saveUnitDraft(d); return askUnitBuilding(chatId, d, messageId); }
+  if (!d.parentId && !d.location) { d.step = 'area'; saveUnitDraft(d); return askUnitArea(chatId, d, messageId); }
+  if (!d.propertyType) {
+    const f = d.facts;
+    if ((f.floor || f.unitNumber) && f.bedrooms !== null) { d.propertyType = 'Condo'; d.typeAssumed = true; }
+    else { d.step = 'type'; saveUnitDraft(d); return askUnitType(chatId, d, messageId); }
+  }
+  d.step = 'summary';
+  saveUnitDraft(d);
+  return showUnitSummary(chatId, d, messageId);
+}
+
+// Say something: edit the message that was tapped, or send a new one.
+function unitSay(chatId, messageId, text, markup) {
+  if (messageId) editUnitMessage(chatId, messageId, text, markup);
+  else sendTelegramMessage(chatId, text, markup);
+}
+
+function askUnitBuilding(chatId, d, messageId) {
+  const f = d.facts;
+  unitSay(chatId, messageId,
+    'Got ' + d.images.length + ' photo' + (d.images.length === 1 ? '' : 's') + (f.video ? ' and a video link' : '') + '. Is this building already on the website?',
     { inline_keyboard: [[
       { text: 'Select existing project', callback_data: 'unit_' + d.id + '_pick' },
       { text: 'New building', callback_data: 'unit_' + d.id + '_new' },
     ], [{ text: 'Cancel', callback_data: 'unit_' + d.id + '_x' }]] });
 }
 
-// A plain-text reply right after tapping "New building" is the building name.
-function isAwaitingUnitName(chatId, text, isForwarded) {
+function askUnitArea(chatId, d, messageId) {
+  const rows = [];
+  for (let i = 0; i < UNIT_AREAS.length; i += 2) {
+    rows.push(UNIT_AREAS.slice(i, i + 2).map(function (a, k) { return { text: a, callback_data: 'unit_' + d.id + '_a_' + (i + k) }; }));
+  }
+  rows.push([{ text: 'Cancel', callback_data: 'unit_' + d.id + '_x' }]);
+  unitSay(chatId, messageId, d.buildingName + ' is not on the website yet. Which area is it in?', { inline_keyboard: rows });
+}
+
+function askUnitType(chatId, d, messageId) {
+  const rows = [];
+  for (let i = 0; i < UNIT_TYPES.length; i += 2) {
+    rows.push(UNIT_TYPES.slice(i, i + 2).map(function (t, k) { return { text: t, callback_data: 'unit_' + d.id + '_t_' + (i + k) }; }));
+  }
+  rows.push([{ text: 'Cancel', callback_data: 'unit_' + d.id + '_x' }]);
+  unitSay(chatId, messageId, 'What type of property is it?', { inline_keyboard: rows });
+}
+
+// A typed reply to "What is the building called?" / "Which area?"
+function isAwaitingUnitText(chatId, text, isForwarded) {
   if (!text || isForwarded) return false;
   if (/#ForSale|#ForRent|#NewProject/i.test(text)) return false;
   return !!unitCache().get('unitawait_' + chatId);
 }
 
-function handleUnitNameReply(chatId, text) {
+function handleUnitTextReply(chatId, text) {
   chatId = String(chatId);
-  const id = unitCache().get('unitawait_' + chatId);
-  const d = id ? loadUnitDraft(id) : null;
+  const raw = unitCache().get('unitawait_' + chatId);
   unitCache().remove('unitawait_' + chatId);
-  const name = String(text).replace(/\s+/g, ' ').trim().slice(0, 120);
-  if (!d || !name) { sendTelegramMessage(chatId, 'That draft has expired. Send the #unit message again.'); return; }
-  d.buildingName = name;
-  d.parentId = null;
-  d.step = 'summary';
-  saveUnitDraft(d);
+  let wait = null;
+  try { wait = JSON.parse(raw); } catch (e) { wait = null; }
+  const d = wait && wait.id ? loadUnitDraft(wait.id) : null;
+  const value = String(text).replace(/\s+/g, ' ').trim().slice(0, 120);
+  if (!d || !value) { sendTelegramMessage(chatId, 'That draft has expired. Send the post again.'); return; }
+  if (wait.what === 'area') {
+    d.location = value;
+    d.city = d.city || 'Phnom Penh';
+  } else {
+    const hit = matchUnitProject(value, fetchUnitProjects());
+    if (hit) { d.parentId = hit.id; d.buildingName = hit.title; d.location = null; d.city = null; }
+    else { d.buildingName = titleCaseBuilding(value); d.parentId = null; }
+  }
   unitSessionTouch();
-  showUnitSummary(chatId, d, null);
+  advanceUnitDraft(chatId, d, null);
 }
 
-// ── Buttons ─────────────────────────────────────────────────────────
+// ── Buttons of the draft ────────────────────────────────────────────
 
 function handleUnitCallback(cb, rest) {
   const chatId = cb.message && cb.message.chat ? String(cb.message.chat.id) : '';
@@ -1751,7 +2126,7 @@ function handleUnitCallback(cb, rest) {
   const parts = String(rest).split('_');
   const id = parts[0], verb = parts[1], arg = parts[2];
   const d = loadUnitDraft(id);
-  if (!d) { answerCallback(cb.id, 'This draft expired. Send the #unit message again.'); return; }
+  if (!d) { answerCallback(cb.id, 'This draft expired. Send the post again.'); return; }
   const messageId = cb.message.message_id;
   unitSessionTouch();
 
@@ -1762,6 +2137,7 @@ function handleUnitCallback(cb, rest) {
     editUnitMessage(chatId, messageId, 'Cancelled. Nothing was created.', null);
     return;
   }
+  if (verb === 'chan') { handleUnitChannelTap(cb, chatId, messageId, d); return; }
   if (d.step === 'running' || d.step === 'done') { answerCallback(cb.id, d.step === 'done' ? 'Already created.' : 'Already working on it.'); return; }
 
   if (verb === 'pick' || verb === 'back') {
@@ -1778,7 +2154,7 @@ function handleUnitCallback(cb, rest) {
   }
   if (verb === 'new') {
     answerCallback(cb.id, '');
-    unitCache().put('unitawait_' + chatId, id, 3600);
+    unitCache().put('unitawait_' + chatId, JSON.stringify({ id: id, what: 'name' }), 3600);
     editUnitMessage(chatId, messageId, 'What is the building called? Reply with just the name, for example: Sky Villa', null);
     return;
   }
@@ -1786,12 +2162,40 @@ function handleUnitCallback(cb, rest) {
     const pid = parseInt(arg, 10);
     const proj = fetchUnitProjects().filter(function (p) { return p.id === pid; })[0];
     if (!proj) { answerCallback(cb.id, 'Project not found.'); return; }
-    d.parentId = proj.id;
-    d.buildingName = proj.title;
-    d.step = 'summary';
+    d.parentId = proj.id; d.buildingName = proj.title; d.location = null; d.city = null;
     answerCallback(cb.id, proj.title);
     saveUnitDraft(d);
-    showUnitSummary(chatId, d, messageId);
+    advanceUnitDraft(chatId, d, messageId);
+    return;
+  }
+  if (verb === 'a') {
+    const area = UNIT_AREAS[parseInt(arg, 10)];
+    if (!area) { answerCallback(cb.id, ''); return; }
+    answerCallback(cb.id, area);
+    if (area === 'Other') {
+      unitCache().put('unitawait_' + chatId, JSON.stringify({ id: id, what: 'area' }), 3600);
+      editUnitMessage(chatId, messageId, 'Which area is it in? Reply with just the area name.', null);
+      return;
+    }
+    d.location = area; d.city = d.city || 'Phnom Penh';
+    saveUnitDraft(d);
+    advanceUnitDraft(chatId, d, messageId);
+    return;
+  }
+  if (verb === 't') {
+    const type = UNIT_TYPES[parseInt(arg, 10)];
+    if (!type) { answerCallback(cb.id, ''); return; }
+    d.propertyType = type; d.typeAssumed = false;
+    answerCallback(cb.id, type);
+    saveUnitDraft(d);
+    advanceUnitDraft(chatId, d, messageId);
+    return;
+  }
+  if (verb === 'chg') {
+    answerCallback(cb.id, '');
+    d.propertyType = null; d.typeAssumed = false; d.step = 'type';
+    saveUnitDraft(d);
+    askUnitType(chatId, d, messageId);
     return;
   }
   if (verb === 'f') {
@@ -1812,38 +2216,75 @@ function handleUnitCallback(cb, rest) {
   answerCallback(cb.id, '');
 }
 
-// Returns true if these photos belong to an album whose #unit caption was already handled.
-function unitAddLateAlbumPhotos(chatId, mediaGroupId, imageIds) {
-  const draftId = unitCache().get('unitgroup_' + mediaGroupId);
-  if (!draftId) return false;
-  const d = loadUnitDraft(draftId);
-  if (!d) return true; // the draft was cancelled or expired: drop the stray photos quietly
-  if (d.step === 'running' || d.step === 'done') {
-    sendTelegramMessage(String(chatId), 'One more photo from that album arrived after I had started creating the page, so it is not included. Add it later in the admin if you need it.');
+// Returns true if these photos belong to an album whose text was already handled.
+function unitAddLateAlbumPhotos(chatId, mediaGroupId, imageIds, photoIds) {
+  const ref = unitCache().get('unitgroup_' + mediaGroupId);
+  if (!ref) return false;
+  chatId = String(chatId);
+  const kind = ref.indexOf(':') !== -1 ? ref.split(':')[0] : 'draft';
+  const id = ref.indexOf(':') !== -1 ? ref.split(':')[1] : ref;
+  const addTo = function (list, items) { (items || []).forEach(function (f) { if (list.indexOf(f) === -1 && list.length < UNIT_MAX_PHOTOS) list.push(f); }); };
+  if (kind === 'menu') {
+    const m = loadUnitMenu(id);
+    if (!m) return true;
+    if (m.used === 'chan' || m.used === 'ign') {
+      if (m.used === 'chan') sendTelegramMessage(chatId, 'One more photo from that album arrived after I had started the channel posts, so it is not included.');
+      return true;
+    }
+    addTo(m.images, imageIds); addTo(m.orig.photoIds, photoIds);
+    saveUnitMenu(m);
     return true;
   }
-  (imageIds || []).forEach(function (f) { if (d.images.indexOf(f) === -1 && d.images.length < UNIT_MAX_PHOTOS) d.images.push(f); });
+  const d = loadUnitDraft(id);
+  if (!d) return true; // the draft was cancelled or expired: drop the stray photos quietly
+  if (d.step === 'running' || d.step === 'done') {
+    sendTelegramMessage(chatId, 'One more photo from that album arrived after I had started creating the page, so it is not included. Add it later in the admin if you need it.');
+    return true;
+  }
+  addTo(d.images, imageIds);
+  if (d.orig) addTo(d.orig.photoIds, photoIds);
   saveUnitDraft(d);
   return true;
 }
 
-// ── Step 3: the summary card with the facilities tick-list ──────────
+// ── Step 3: the summary ─────────────────────────────────────────────
+
+function unitFinalFeatures(d) {
+  const out = [];
+  (d.extraFeatures || []).concat(d.features || []).forEach(function (x) {
+    const low = String(x).toLowerCase();
+    if (!out.some(function (y) { return y.toLowerCase() === low; })) out.push(x);
+  });
+  return out.slice(0, 30);
+}
 
 function unitSummaryText(d) {
   const f = d.facts;
+  const type = d.propertyType ? d.propertyType + (d.typeAssumed ? ' (assumed, tap Change type to fix)' : '') : 'not set';
+  const missing = [];
+  if (f.bedrooms === null && d.propertyType !== 'Land') missing.push('bedrooms');
+  if (f.bathrooms === null && d.propertyType !== 'Land') missing.push('bathrooms');
+  if (!f.sqm) missing.push('size');
+  if (!f.floor && d.propertyType !== 'Land' && d.propertyType !== 'Villa / House') missing.push('floor');
+  if (!d.images.length) missing.push('photos');
+  const feats = unitFinalFeatures(d);
   const lines = [
     'Unit summary',
     '',
-    'Building: ' + d.buildingName + (d.parentId ? ' (on the website)' : ' (new building)'),
+    'Building: ' + d.buildingName + (d.parentId ? ' (on the website)' : ' (new building' + (d.location ? ', ' + d.location : '') + ')'),
     'Page title: ' + (d.title || '...'),
-    'Type: ' + (f.listingType === 'rent' ? 'Rent, per month' : 'Resale') + '   Price: $' + f.price.toLocaleString('en-US'),
-    'Bedrooms: ' + (f.bedrooms === 0 ? 'Studio' : f.bedrooms) + '   Bathrooms: ' + (f.bathrooms === null ? '1' : f.bathrooms) + '   Area: ' + (f.sqm === null ? 'not given' : f.sqm + ' sqm'),
+    'Type: ' + type,
+    'Listing: ' + (f.listingType === 'rent' ? 'For rent' : 'Resale') + '   Price: ' + formatUsd(f.price) + (f.listingType === 'rent' ? '/month' : ''),
+    'Bedrooms: ' + (f.bedrooms === null ? 'not given' : (f.bedrooms === 0 ? 'Studio' : f.bedrooms)) + '   Bathrooms: ' + (f.bathrooms === null ? 'not given' : f.bathrooms) + '   Area: ' + (f.sqm ? f.sqm + ' sqm' : 'not given'),
     'Floor: ' + (f.floor || 'not given') + (f.unitNumber ? '   Unit no. (private, never shown): ' + f.unitNumber : ''),
     'Photos: ' + d.images.length + '   Video: ' + (f.video ? 'yes' : 'no'),
-    '',
-    'Facilities: ' + (d.features.length ? d.features.length + ' ticked' : (d.parentId ? 'none ticked, so the building\'s own list is copied' : 'none ticked')),
-    d.parentId ? 'Tick any facilities to use your own list instead of the building\'s.' : 'Tick the facilities this unit has.',
   ];
+  if ((d.extraFeatures || []).length) lines.push('From your post: ' + d.extraFeatures.slice(0, 8).join(', ') + (d.extraFeatures.length > 8 ? ' and ' + (d.extraFeatures.length - 8) + ' more' : ''));
+  if (missing.length) lines.push('Not given: ' + missing.join(', ') + ' (you will see these on the draft page checklist)');
+  const claim = feats.filter(function (x) { return /strata|hard title|soft title|freehold|guarantee|yield|roi|return/i.test(x); });
+  if (claim.length) lines.push('Claim to verify before going live: ' + claim.join(', '));
+  lines.push('');
+  lines.push('Facilities: ' + (d.features.length ? d.features.length + ' ticked' : ((d.extraFeatures || []).length || !d.parentId ? 'tick any more below' : 'none ticked, so the building\'s own list is copied')));
   return lines.join('\n');
 }
 
@@ -1856,7 +2297,8 @@ function unitSummaryKeyboard(d) {
     }));
   }
   rows.push([{ text: 'Create draft page', callback_data: 'unit_' + d.id + '_go' }]);
-  rows.push([{ text: 'Change building', callback_data: 'unit_' + d.id + '_back' }, { text: 'Cancel', callback_data: 'unit_' + d.id + '_x' }]);
+  rows.push([{ text: 'Change type', callback_data: 'unit_' + d.id + '_chg' }, { text: 'Change building', callback_data: 'unit_' + d.id + '_back' }]);
+  rows.push([{ text: 'Cancel', callback_data: 'unit_' + d.id + '_x' }]);
   return { inline_keyboard: rows };
 }
 
@@ -1869,8 +2311,7 @@ function showUnitSummary(chatId, d, messageId, keepTitle) {
       bedrooms: d.facts.bedrooms, floor: d.facts.floor,
     });
     if (res.code !== 200 || !res.body.ok) {
-      const msg = describeIntakeFailure(res, 'prepare the page title');
-      if (messageId) editUnitMessage(chatId, messageId, msg, null); else sendTelegramMessage(chatId, msg);
+      unitSay(chatId, messageId, describeIntakeFailure(res, 'prepare the page title'), null);
       return;
     }
     d.title = res.body.title;
@@ -1902,7 +2343,8 @@ function runUnitCreate(chatId, id, messageId) {
   editUnitMessage(chatId, messageId, (isUnitDryRun() ? '[DRY RUN] ' : '') + 'Creating the draft for ' + d.title + '. This takes about a minute, I will message you when it is ready.', null);
 
   // Decide the final title/folder first, so a unit can never share a photo folder with another.
-  const prep = callIntake({ action: 'prepare', parentPropertyId: d.parentId, buildingName: d.buildingName, bedrooms: d.facts.bedrooms, floor: d.facts.floor });
+  const f = d.facts;
+  const prep = callIntake({ action: 'prepare', parentPropertyId: d.parentId, buildingName: d.buildingName, bedrooms: f.bedrooms, floor: f.floor });
   if (prep.code !== 200 || !prep.body.ok) { back(describeIntakeFailure(prep, 'prepare the page title') + '\nTap Create draft page to try again.'); return; }
   const title = prep.body.title, slug = prep.body.slug;
 
@@ -1918,12 +2360,14 @@ function runUnitCreate(chatId, id, messageId) {
     res.body.urls.forEach(function (u) { urls.push(u); });
   }
 
-  const f = d.facts;
+  const isLand = d.propertyType === 'Land';
   const created = callIntake({
-    action: 'create', title: title, price: f.price, listingType: f.listingType,
+    action: 'create', title: title, price: f.price, listingType: f.listingType || 'resale',
     parentPropertyId: d.parentId, unitNumber: f.unitNumber, unitFloor: f.floor,
-    bedrooms: f.bedrooms, bathrooms: f.bathrooms === null ? 1 : f.bathrooms, sqm: f.sqm === null ? 0 : f.sqm,
-    features: d.features, images: urls, videoUrl: f.video,
+    bedrooms: isLand ? null : f.bedrooms, bathrooms: isLand ? null : f.bathrooms,
+    sqm: f.sqm || 0, floorArea: f.sqm ? f.sqm + ' sqm' : null,
+    propertyType: d.propertyType, location: d.location, city: d.city,
+    features: unitFinalFeatures(d), images: urls, videoUrl: f.video,
   });
   if (created.code !== 200 || !created.body.ok) {
     callIntake({ action: 'cleanup', slug: slug });
@@ -1932,20 +2376,79 @@ function runUnitCreate(chatId, id, messageId) {
   }
 
   d.step = 'done';
+  d.created = { id: created.body.id, slug: created.body.slug || slug, refCode: created.body.refCode || null, title: title };
   saveUnitDraft(d);
   unitSessionEnd();
+  const both = d.route === 'both';
   sendTelegramMessage(chatId,
     (isUnitDryRun() ? '[DRY RUN] ' : '') + 'Hidden draft created. Nobody else can see it yet.\n\n' +
     title + (created.body.refCode ? '\nRef: ' + created.body.refCode : '') + '\n\nPreview link:\n' + created.body.previewUrl + '\n\n' +
     '1. Open the link while you are logged in to the website as admin.\n' +
-    '2. Check the photos, facts and facilities.\n' +
-    '3. Tap Publish Unit Live at the bottom of the page.');
+    '2. Check the photos, facts and the checklist of open items.\n' +
+    '3. Tap Publish Unit Live, then Confirm.' +
+    (both ? '\n\nWhen the page is live, tap the button below and I will prepare the channel posts with its link.' : ''),
+    both ? { inline_keyboard: [[{ text: 'The page is live, prepare channel posts', callback_data: 'unit_' + d.id + '_chan' }]] } : null);
+}
+
+// ── "Both": the channel posts come after the page is live ───────────
+
+function unitPageIsLive(id) {
+  const resp = UrlFetchApp.fetch(SUPABASE_REST_URL + '/properties?select=id&id=eq.' + id + '&status=eq.active', {
+    headers: { apikey: SUPABASE_PUBLISHABLE_KEY, Authorization: 'Bearer ' + SUPABASE_PUBLISHABLE_KEY },
+    muteHttpExceptions: true,
+  });
+  if (resp.getResponseCode() !== 200) return false;
+  try { return JSON.parse(resp.getContentText()).length > 0; } catch (e) { return false; }
+}
+
+// The channel posts are built from the same facts, in the template the existing flow already reads.
+function unitFactsToChannelText(d) {
+  const f = d.facts;
+  const price = formatUsd(f.price);
+  const lines = [f.listingType === 'rent' ? '#ForRent ' + price + '/month' : '#ForSale ' + price, ''];
+  const kind = f.bedrooms === 0 ? 'STUDIO' : (f.bedrooms ? f.bedrooms + 'BR UNIT' : 'UNIT');
+  lines.push(String(d.buildingName).toUpperCase() + ' | ' + kind);
+  const loc = [d.location, d.city].filter(Boolean).join(', ');
+  if (loc) lines.push('📍 ' + loc);
+  lines.push('', '――――――――――', '', 'UNIT DETAILS');
+  if (f.floor) lines.push('✅ ' + f.floor + (/^\d+$/.test(f.floor) ? 'th' : '') + ' Floor');
+  if (f.bedrooms !== null || f.bathrooms !== null) lines.push('✅ ' + [f.bedrooms === null ? null : (f.bedrooms === 0 ? 'Studio' : f.bedrooms + ' Bedroom'), f.bathrooms === null ? null : f.bathrooms + ' Bathroom'].filter(Boolean).join(' | '));
+  if (f.sqm) lines.push('✅ ' + f.sqm + ' sqm');
+  unitFinalFeatures(d).forEach(function (x) { lines.push('✅ ' + x); });
+  return lines.join('\n');
+}
+
+function handleUnitChannelTap(cb, chatId, messageId, d) {
+  if (!d.created) { answerCallback(cb.id, 'The page is not created yet.'); return; }
+  if (d.channelsStarted) { answerCallback(cb.id, 'Already started.'); return; }
+  if (!isUnitDryRun() && !unitPageIsLive(d.created.id)) {
+    answerCallback(cb.id, 'Not live yet.');
+    sendTelegramMessage(chatId, 'The page is not live yet. Open the preview link, tap Publish Unit Live and Confirm on the website, then tap the button again.');
+    return;
+  }
+  d.channelsStarted = true;
+  saveUnitDraft(d);
+  answerCallback(cb.id, 'Preparing the channel posts...');
+  const pageUrl = 'https://www.propertyhubcambodia.com/property/' + d.created.slug;
+  const original = d.orig && /#ForSale|#ForRent|#NewProject/i.test(d.orig.text || '') ? d.orig.text : unitFactsToChannelText(d);
+  const photoIds = d.orig && d.orig.photoIds && d.orig.photoIds.length ? d.orig.photoIds : [];
+  processChannelListing(chatId, original, photoIds, false, null, null, pageUrl, d.created.refCode);
+}
+
+// Adds the live page link and the reference code to a finished channel post, just above the contact block.
+function addPageLink(content, pageUrl, refCode) {
+  if (!pageUrl) return content;
+  const marker = '――――――――――\n' + CONTACT_STANDARD;
+  const extra = '🔗 ' + pageUrl + (refCode ? '\n🏷 Ref ' + refCode : '');
+  const at = content.lastIndexOf(marker);
+  if (at === -1) return content + '\n\n' + extra;
+  return content.slice(0, at) + extra + '\n\n' + content.slice(at);
 }
 
 // Edits an existing bot message's text and buttons (pass null to remove the buttons).
 function editUnitMessage(chatId, messageId, text, replyMarkup) {
   const token = PropertiesService.getScriptProperties().getProperty('BOT_TOKEN');
-  const payload = { chat_id: String(chatId), message_id: String(messageId), text: text }; // strings on purpose, see handleUnitIntake
+  const payload = { chat_id: String(chatId), message_id: String(messageId), text: text }; // strings on purpose, see startWebsiteDraft
   if (replyMarkup) payload.reply_markup = JSON.stringify(replyMarkup);
   else payload.reply_markup = JSON.stringify({ inline_keyboard: [] });
   const resp = UrlFetchApp.fetch('https://api.telegram.org/bot' + token + '/editMessageText', {
