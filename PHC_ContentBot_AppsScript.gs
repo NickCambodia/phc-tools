@@ -110,10 +110,11 @@ function checkForUpdates() {
   if (!lock.tryLock(3000)) { Logger.log('checkForUpdates: previous run still busy, skipping'); return; }
   try {
     pollTelegramOnce(0);
-    // FAST MODE: while a #unit draft is in progress, keep listening (Telegram "long polling")
-    // for the rest of this minute so taps are answered in seconds, not at the next 1-minute tick.
-    // It switches itself off 10 minutes after the last tap (see unitSessionTouch).
-    const stopAt = Date.now() + 40000;
+    // FAST MODE: while a website draft is in progress, keep listening (Telegram "long polling") so taps are
+    // answered in seconds, not at the next 1-minute tick. One run covers the whole session (up to 4 minutes,
+    // inside Apps Script's 6 minute limit); the per-user lock makes the 1-minute triggers skip meanwhile, and
+    // the next trigger carries on if the session is still open. The session ends 10 minutes after the last tap.
+    const stopAt = Date.now() + UNIT_FAST_MODE_MS;
     while (isUnitSessionActive() && Date.now() < stopAt) pollTelegramOnce(5);
   } finally {
     lock.releaseLock();
@@ -1630,6 +1631,7 @@ function loadUnitDraft(id) {
 // A "session" is open from the #unit message until the draft is created or cancelled
 // (or 10 minutes after the last tap). While it is open, checkForUpdates listens continuously.
 const UNIT_SESSION_SECONDS = 600;
+const UNIT_FAST_MODE_MS = 240000;
 function unitSessionTouch() { unitCache().put('unitsession', '1', UNIT_SESSION_SECONDS); }
 function unitSessionEnd() { unitCache().remove('unitsession'); }
 function isUnitSessionActive() { return !!unitCache().get('unitsession'); }
@@ -1716,10 +1718,10 @@ const UNIT_TYPES = ['Condo', 'Apartment', 'Villa / House', 'Commercial', 'Land',
 const UNIT_AREAS = ['BKK1', 'BKK3', 'Toul Kork', 'Tonle Bassac', 'Daun Penh', 'Other'];
 const UNIT_CITIES = { 'phnom penh': 'Phnom Penh', 'siem reap': 'Siem Reap', 'sihanoukville': 'Sihanoukville', 'preah sihanouk': 'Sihanoukville', 'kampot': 'Kampot', 'kep': 'Kep', 'battambang': 'Battambang', 'kandal': 'Kandal' };
 
-// "RESIDENCE L" -> "Residence L". Mixed-case names are kept as typed.
+// "RESIDENCE L" and "sky villa" become "Residence L" and "Sky Villa". Mixed-case names are kept as typed.
 function titleCaseBuilding(name) {
   const n = String(name || '').replace(/\s+/g, ' ').trim();
-  if (n !== n.toUpperCase()) return n;
+  if (n !== n.toUpperCase() && n !== n.toLowerCase()) return n;
   return n.toLowerCase().split(' ').map(function (w) {
     if (/\d/.test(w) || w.length <= 2) return w.toUpperCase();
     return w.charAt(0).toUpperCase() + w.slice(1);
@@ -1792,11 +1794,73 @@ function applyDetailSegment(seg, out) {
   return false;
 }
 
+// "Boeung Tumpun, Phnom Penh" -> location "Boeung Tumpun", city "Phnom Penh".
+function readLocation(loc, out) {
+  const parts = String(loc || '').split(',').map(function (s) { return s.trim(); }).filter(Boolean);
+  const last = parts.length ? parts[parts.length - 1].toLowerCase() : '';
+  if (UNIT_CITIES[last]) { out.city = UNIT_CITIES[last]; parts.pop(); }
+  out.locationText = parts.length ? parts.join(', ') : null;
+}
+
+// One "Label: value" line. Returns true when the label is one we understand.
+function applyLabelValue(label, value, out) {
+  let m;
+  if (/^(floor|level|storey)$/.test(label)) {
+    m = value.match(/^([0-9]{1,3})(?:st|nd|rd|th)?$/i) || value.match(/^(G)$/i);
+    if (m) { out.floor = String(m[1]).toUpperCase(); return true; }
+    return false;
+  }
+  if (/^(unit|unit no\.?|unit number|room|room no\.?)$/.test(label)) { if (/\d/.test(value)) out.unitNumber = value.toUpperCase().slice(0, 12); return true; }
+  if (/^(bedrooms?|beds?|bedroom type)$/.test(label)) {
+    if (/studio/i.test(value)) out.bedrooms = 0;
+    else if ((m = value.match(/(\d+)/))) out.bedrooms = parseInt(m[1], 10);
+    return true;
+  }
+  if (/^(bathrooms?|baths?)$/.test(label)) { if ((m = value.match(/(\d+)/))) out.bathrooms = parseInt(m[1], 10); return true; }
+  if (/^(gross( size| area)?|net( size| area)|size|unit size|floor area|area)$/.test(label)) {
+    const kind = /net/.test(label) ? ' net' : (/gross/.test(label) ? ' gross' : '');
+    if (applyDetailSegment(value + kind, out)) return true;
+    if (/^[0-9]+(?:[.,][0-9]+)?$/.test(value)) { return applyDetailSegment(value + ' sqm' + kind, out); }
+    if (label === 'area' && out.locationText === null) { readLocation(value, out); return true; }
+    return false;
+  }
+  if (/^(price|selling price|asking price|rental price|rent|rental)$/.test(label)) {
+    m = value.match(/([0-9][0-9,]*(?:\.[0-9]+)?)\s*([kKmM])?/);
+    if (m && out.price === null) {
+      let p = parseFloat(m[1].replace(/,/g, ''));
+      const mult = (m[2] || '').toLowerCase();
+      if (mult === 'k') p *= 1000;
+      if (mult === 'm') p *= 1000000;
+      if (p > 0) out.price = Math.round(p);
+    }
+    if (/rent/.test(label) || /\/\s*month|per\s+month/i.test(value)) out.listingType = 'rent';
+    return true;
+  }
+  if (/^(project|building|property|development|name)$/.test(label)) { out.buildingName = titleCaseBuilding(value); return true; }
+  if (/^(location|address|district|neighbou?rhood)$/.test(label)) { readLocation(value, out); return true; }
+  if (/^(facing|view|views|direction|orientation|furnished|furnishing|furniture|handover|completion|availability|available|parking|balcony|ownership|tenure|title)$/.test(label)) {
+    addUnitFeature(out, label.replace(/\b\w/g, function (c) { return c.toUpperCase(); }) + ': ' + value);
+    return true;
+  }
+  return false;
+}
+
+// A project from the site named anywhere in the post ("Time Square 10 resale ..."). Exactly one must match.
+function findProjectInText(text, projects) {
+  const t = String(text || '');
+  const hits = (projects || []).filter(function (p) {
+    const words = String(p.title).trim().split(/\s+/).map(function (w) { return w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); });
+    if (!words.length) return false;
+    return new RegExp('(^|[^A-Za-z0-9])' + words.join('[\\s\\-]*') + '(?![A-Za-z0-9])', 'i').test(t);
+  });
+  return hits.length === 1 ? hits[0] : null;
+}
+
 function parseTelegramPost(text) {
   const out = {
     found: false, buildingName: null, bedrooms: null, bathrooms: null, grossSqm: null, netSqm: null, sqm: null,
     floor: null, unitNumber: null, price: null, priceChange: null, listingType: null,
-    locationText: null, city: null, extraFeatures: [], propertyType: null, usedSqft: false,
+    locationText: null, city: null, extraFeatures: [], propertyType: null, usedSqft: false, paymentFound: false,
   };
   const plain = fromBoldSansSerif(String(text || ''));
   const lines = plain.split('\n').map(function (l) { return l.trim(); });
@@ -1814,6 +1878,10 @@ function parseTelegramPost(text) {
 
     if (/^(?:unit details|details|facilities|features|amenities|utilities)\s*:?$/i.test(line)) { section = line.toLowerCase().replace(/\s*:\s*$/, ''); return; }
 
+    // "Payment Plans:" and everything after it (deposit, instalments, handover payment) stays off the page.
+    if (/^[•\-*\s]*payment\s*(?:plans?|terms?|schedule)\b/i.test(line)) { section = 'payment'; out.paymentFound = true; return; }
+    if (section === 'payment') return;
+
     if (/#ForSale|#ForRent|#NewProject/i.test(line) || /^💰/u.test(line) || (/\b(price|rent)\b/i.test(line) && /\$/.test(line))) {
       readPriceLine(line, out);
       titleText += ' ' + line.replace(/\$[0-9,.]+/g, '');
@@ -1822,14 +1890,14 @@ function parseTelegramPost(text) {
     }
 
     if (/^📍/u.test(line)) {
-      const loc = line.replace(/^📍\s*/u, '').trim();
-      const parts = loc.split(',').map(function (s) { return s.trim(); }).filter(Boolean);
-      const last = parts.length ? parts[parts.length - 1].toLowerCase() : '';
-      if (UNIT_CITIES[last]) { out.city = UNIT_CITIES[last]; parts.pop(); }
-      out.locationText = parts.length ? parts.join(', ') : null;
+      readLocation(line.replace(/^📍\s*/u, '').trim(), out);
       out.found = true;
       return;
     }
+
+    // "Label: value" lines (Floor: 6, Gross Size: 40 Sqm, Facing: East ...). Unknown labels are ignored.
+    const lv = line.match(/^([A-Za-z][A-Za-z .\/&]{1,24}?)\s*[:：]\s*(\S.*)$/);
+    if (lv && !bulletRe.test(line) && applyLabelValue(lv[1].trim().toLowerCase(), lv[2].trim(), out)) { out.found = true; return; }
 
     const bm = line.match(bulletRe);
     if (bm) {
@@ -1882,6 +1950,7 @@ function parseUnitFacts(text) {
   facts.city = full.city;
   facts.extraFeatures = full.extraFeatures;
   facts.priceChange = full.priceChange;
+  facts.paymentFound = full.paymentFound;
   facts.isFullPost = full.found;
   facts.propertyType = full.propertyType || (full.found ? null : guessUnitType(text));
   return facts;
@@ -2032,7 +2101,11 @@ function startWebsiteDraft(chatId, text, imageFileIds, mediaGroupId, orig, route
     propertyType: facts.propertyType || null, typeAssumed: false, location: facts.locationText || null, city: facts.city || null,
     messageId: null, created: null,
   };
-  if (d.buildingName) {
+  if (!d.buildingName) {
+    const found = findProjectInText(text, fetchUnitProjects());
+    if (found) { d.parentId = found.id; d.buildingName = found.title; d.location = null; d.city = null; d.matchedFromText = true; }
+  }
+  if (d.buildingName && !d.parentId) {
     const hit = matchUnitProject(d.buildingName, fetchUnitProjects());
     if (hit) { d.parentId = hit.id; d.buildingName = hit.title; d.location = null; d.city = null; }
   }
@@ -2271,7 +2344,7 @@ function unitSummaryText(d) {
   const lines = [
     'Unit summary',
     '',
-    'Building: ' + d.buildingName + (d.parentId ? ' (on the website)' : ' (new building' + (d.location ? ', ' + d.location : '') + ')'),
+    'Building: ' + d.buildingName + (d.parentId ? ' (on the website' + (d.matchedFromText ? ', found in your post' : '') + ')' : ' (new building' + (d.location ? ', ' + d.location : '') + ')'),
     'Page title: ' + (d.title || '...'),
     'Type: ' + type,
     'Listing: ' + (f.listingType === 'rent' ? 'For rent' : 'Resale') + '   Price: ' + formatUsd(f.price) + (f.listingType === 'rent' ? '/month' : ''),
@@ -2280,6 +2353,7 @@ function unitSummaryText(d) {
     'Photos: ' + d.images.length + '   Video: ' + (f.video ? 'yes' : 'no'),
   ];
   if ((d.extraFeatures || []).length) lines.push('From your post: ' + d.extraFeatures.slice(0, 8).join(', ') + (d.extraFeatures.length > 8 ? ' and ' + (d.extraFeatures.length - 8) + ' more' : ''));
+  if (f.paymentFound) lines.push('Payment plan found in your post: not added to the page (add it in the admin if you want it)');
   if (missing.length) lines.push('Not given: ' + missing.join(', ') + ' (you will see these on the draft page checklist)');
   const claim = feats.filter(function (x) { return /strata|hard title|soft title|freehold|guarantee|yield|roi|return/i.test(x); });
   if (claim.length) lines.push('Claim to verify before going live: ' + claim.join(', '));
