@@ -161,7 +161,12 @@ function pollTelegramOnce(timeoutSeconds) {
       catch (err) { Logger.log('handleReactionUpdate error: ' + err); }
     } else if (update.message) {
       const m = update.message;
-      if (m.reply_to_message && String(m.chat.id) === REVIEWER_CHAT_ID && looksLikeStatusKeyword(m.text)) {
+      let handledAsUnitReply = false;
+      try { handledAsUnitReply = handleUnitReply(m); }
+      catch (err) { Logger.log('handleUnitReply error: ' + err); }
+      if (handledAsUnitReply) {
+        // a reply to one of the bot's own website messages (draft created, price card): handled
+      } else if (m.reply_to_message && String(m.chat.id) === REVIEWER_CHAT_ID && looksLikeStatusKeyword(m.text)) {
         // Nick replying "SOLD" / "RENTED" / etc. directly to a listing's review
         // message — update the already-posted channel messages in place.
         try { handleStatusReply(m.chat.id, m.text, m.reply_to_message.message_id); }
@@ -2742,6 +2747,37 @@ function handlePriceCallback(cb, rest) {
     if (st.status !== 'active') { sendTelegramMessage(chatId, 'The page is not live, so I did not prepare channel posts.'); return; }
     processChannelListing(chatId, priceDropChannelText(st), [], false, null, null, st.url, st.ref);
   }
+}
+
+// ── Replying to the bot's own website messages ───────────────────────────────────────
+// "Hidden draft created ... Ref: TS10-1021" or "Found TS10-1021 ..." can be answered directly: "SOLD", "RENTED",
+// "reduced to $48,999" or just "$48,999". The unit number is read from the message being replied to.
+
+function replyIsChannelReview(messageId) {
+  try {
+    const sheet = getQueueSheet();
+    const rows = sheet.getDataRange().getValues();
+    const reviewIdx = rows[0].indexOf('reviewMsgId');
+    for (let i = 1; i < rows.length; i++) if (String(rows[i][reviewIdx]) === String(messageId)) return true;
+  } catch (e) { /* no queue sheet to check: treat as not a review message */ }
+  return false;
+}
+
+// Returns true when the reply was handled here. A reply to a channel review message is left to the older status route.
+function handleUnitReply(m) {
+  if (!m.reply_to_message || !m.text || String(m.chat.id) !== REVIEWER_CHAT_ID) return false;
+  const quoted = String(m.reply_to_message.text || m.reply_to_message.caption || '');
+  const refMatch = quoted.match(/(?:\bRef:?|\bFound)\s+([A-Za-z][A-Za-z0-9]{0,5}-\d{4,6})\b/);
+  if (!refMatch) return false;
+  if (replyIsChannelReview(m.reply_to_message.message_id)) return false;
+  const ref = refMatch[1];
+  const text = String(m.text).trim();
+  const status = parseUnitStatusText(text.replace(/^[#\/]?\s*(sold|rented)\b\s*$/i, '$1 ' + ref));
+  if (status) { startUnitStatus(m.chat.id, status); return true; }
+  const asPrice = /^\$\s*\d/.test(text) ? 'price now ' + text : text;
+  const change = parsePriceUpdate(ref + ' ' + asPrice);
+  if (change && change.newPrice) { startPriceUpdate(m.chat.id, change); return true; }
+  return false;
 }
 
 // ── Sold / rented: take a unit off the website ──────────────────────────────────────
