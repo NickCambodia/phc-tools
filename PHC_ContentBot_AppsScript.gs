@@ -395,6 +395,9 @@ function processChannelListing(chatId, text, photoFileIds, isForwarded, sourceUs
   // therefore always rebuilt now, never sent byte-for-byte untouched.
   const ownChannelBody = isFromOwnChannel ? stripTrailingContactBlock(text) + '\n\n――――――――――\n' + CONTACT_STANDARD : '';
 
+  // The review message needs only the English text, so it goes out as soon as the EN row is ready. JP, RU and DE are translated
+  // after that, while you are reading it. Approve All is handled only after this run finishes, so the rows are always complete.
+  let reviewMsg = null;
   ['EN', 'JP', 'RU', 'DE'].forEach(lang => {
     let content;
     if (isFromOwnChannel) {
@@ -427,11 +430,14 @@ function processChannelListing(chatId, text, photoFileIds, isForwarded, sourceUs
       return '';
     });
     sheet.getRange(rowNum, 1, 1, row.length).setValues([row]);
+    if (lang === 'EN') {
+      // One review message covering all 4 languages: approving posts to all channels at once (same listing, translated).
+      reviewMsg = sendCombinedReviewMessage(sheet, headers, sourceId, photoFileIds);
+    } else if (reviewMsg) {
+      sheet.getRange(rowNum, headers.indexOf('status') + 1).setValue('Pending Review');
+      sheet.getRange(rowNum, headers.indexOf('reviewMsgId') + 1).setValue(reviewMsg.message_id || '');
+    }
   });
-
-  // One review message covering all 3 languages — approving posts to all 3
-  // channels at once (they're the same listing, just translated).
-  sendCombinedReviewMessage(sheet, headers, sourceId, photoFileIds);
 }
 
 // Reads the photoFileId cell, which may be a JSON array (multi-photo) or,
@@ -716,7 +722,15 @@ function translateField(text, sourceLang, lang) {
     // result — sentence-case text translates reliably; still displays in caps.
     const isAllCaps = text === text.toUpperCase() && text !== text.toLowerCase();
     const toTranslate = isAllCaps ? text.toLowerCase() : text;
-    const translated = LanguageApp.translate(toTranslate, sourceLang, targetCode);
+    // Lines such as "Fully Furnished" or "Swimming Pool & Gym" come back in almost every listing, so a translation is
+    // remembered for 6 hours (the longest the script cache allows) and the translator is only asked once.
+    const cacheKey = 'tr_' + sourceLang + '_' + targetCode + '_' + toTranslate;
+    const cache = toTranslate.length <= 120 ? CacheService.getScriptCache() : null;
+    let translated = cache ? cache.get(cacheKey) : null;
+    if (translated === null || translated === undefined) {
+      translated = LanguageApp.translate(toTranslate, sourceLang, targetCode);
+      if (cache && translated) { try { cache.put(cacheKey, translated, 21600); } catch (e) { /* a full cache only costs speed */ } }
+    }
     return isAllCaps ? translated.toUpperCase() : translated;
   } catch (err) {
     Logger.log('translate error: ' + err);
@@ -1285,6 +1299,7 @@ function sendCombinedReviewMessage(sheet, headers, sourceId, photoFileIds) {
     sheet.getRange(rowNum, statusIdx + 1).setValue('Pending Review');
     sheet.getRange(rowNum, headers.indexOf('reviewMsgId') + 1).setValue(msg && msg.message_id || '');
   });
+  return msg;
 }
 
 function sendRowForReview(sheet, headers, rowNum) {
@@ -1583,6 +1598,7 @@ const SUPABASE_REST_URL = 'https://gqjetqqhcvedqnssbklm.supabase.co/rest/v1';
 // Public "publishable" key: the same one the website ships to every browser. Not a secret.
 const SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_78bwM2Lar6Hk3wJy2jVMug_Kmheaj15';
 const UNIT_PHOTOS_PER_REQUEST = 3;   // keeps each website request short
+const UNIT_PARALLEL_BATCHES = 4;     // how many photo requests go out at the same time
 const UNIT_MAX_PHOTOS = 40;
 const UNIT_CACHE_SECONDS = 21600;    // a draft in progress is kept for 6 hours (Apps Script cache maximum)
 
@@ -1702,6 +1718,21 @@ function callIntake(payload) {
   return { code: resp.getResponseCode(), body: body };
 }
 
+
+// Several requests at once. Results come back in the same order as the payloads.
+function callIntakeMany(payloads) {
+  if (isUnitDryRun()) return payloads.map(dryRunIntake);
+  const secret = PropertiesService.getScriptProperties().getProperty('INTAKE_API_SECRET');
+  if (!secret) return payloads.map(function () { return { code: 503, body: { ok: false, error: 'no_secret' } }; });
+  const responses = UrlFetchApp.fetchAll(payloads.map(function (p) {
+    return { url: INTAKE_URL, method: 'post', contentType: 'application/json', headers: { Authorization: 'Bearer ' + secret }, payload: JSON.stringify(p), muteHttpExceptions: true };
+  }));
+  return responses.map(function (resp) {
+    let body = null;
+    try { body = JSON.parse(resp.getContentText()); } catch (e) { body = { ok: false, error: 'non_json' }; }
+    return { code: resp.getResponseCode(), body: body };
+  });
+}
 
 function dryRunIntake(payload) {
   if (payload.action === 'prepare') {
@@ -2521,16 +2552,23 @@ function runUnitCreate(chatId, id, messageId) {
   if (prep.code !== 200 || !prep.body.ok) { back(describeIntakeFailure(prep, 'prepare the page title') + '\nTap Create draft page to try again.'); return; }
   const title = prep.body.title, slug = prep.body.slug;
 
-  const urls = [];
+  // The photo batches go to the website side by side (a few at a time), not one after the other.
+  const batches = [];
   for (let i = 0; i < d.images.length; i += UNIT_PHOTOS_PER_REQUEST) {
-    const chunk = d.images.slice(i, i + UNIT_PHOTOS_PER_REQUEST);
-    const res = callIntake({ action: 'photos', slug: slug, startIndex: i, fileIds: chunk });
-    if (res.code !== 200 || !res.body.ok) {
-      callIntake({ action: 'cleanup', slug: slug }); // remove what was already uploaded
-      back(describeIntakeFailure(res, 'store the photos') + '\nNothing was created. Tap Create draft page to try again.');
-      return;
+    batches.push({ action: 'photos', slug: slug, startIndex: i, fileIds: d.images.slice(i, i + UNIT_PHOTOS_PER_REQUEST) });
+  }
+  const urls = [];
+  for (let g = 0; g < batches.length; g += UNIT_PARALLEL_BATCHES) {
+    const results = callIntakeMany(batches.slice(g, g + UNIT_PARALLEL_BATCHES));
+    for (let k = 0; k < results.length; k++) {
+      const res = results[k];
+      if (res.code !== 200 || !res.body.ok) {
+        callIntake({ action: 'cleanup', slug: slug }); // remove what was already uploaded
+        back(describeIntakeFailure(res, 'store the photos') + '\nNothing was created. Tap Create draft page to try again.');
+        return;
+      }
+      res.body.urls.forEach(function (u) { urls.push(u); });
     }
-    res.body.urls.forEach(function (u) { urls.push(u); });
   }
 
   const isLand = d.propertyType === 'Land';
