@@ -825,6 +825,10 @@ function handleCallback(cb) {
     handlePriceCallback(cb, id); // buttons of a price update (callback_data "price_<unitId>_<verb>")
     return;
   }
+  if (action === 'ustat') {
+    handleUnitStatusCallback(cb, id); // buttons of a sold / rented change (callback_data "ustat_<unitId>_<sold|rented>_<verb>")
+    return;
+  }
   if (action === 'approveAll' || action === 'rejectAll') {
     handleGroupCallback(cb, action, id);
     return;
@@ -1109,6 +1113,16 @@ function handleStatusReply(chatId, text, replyToMessageId) {
     if (ref && amount) websiteChange = { id: parseInt(ref[2], 10) - 1000, ref: ref[1], newPrice: parseMoneyAmount(amount[1], amount[2]) };
   }
 
+  // The same post's Ref decides what else a reply can do. No Ref means a channel only post with no page on the website.
+  const postRef = String(sheet.getRange(matchingRows[0], contentIdx + 1).getValue() || '').match(/\bRef\s+([A-Za-z][A-Za-z0-9]{0,5}-(\d{4,6}))\b/);
+  let soldChange = null;
+  if ((upper === 'SOLD' || upper === 'RENTED') && postRef) soldChange = { verb: upper.toLowerCase(), id: parseInt(postRef[2], 10) - 1000, ref: postRef[1] };
+  let pageOffer = null; // a channel only post that could become a website page
+  if (!postRef && !STATUS_LABELS[upper]) {
+    const enRow = matchingRows.filter(function (r) { return sheet.getRange(r, langIdx + 1).getValue() === 'EN'; })[0] || matchingRows[0];
+    pageOffer = { content: String(sheet.getRange(enRow, contentIdx + 1).getValue() || ''), photoIds: parsePhotoIds(photoIdx > -1 ? sheet.getRange(enRow, photoIdx + 1).getValue() : ''), amount: text.match(/\$\s*(\d[\d,]*(?:\.\d+)?)\s*([km])?(?![a-z0-9])/i) };
+  }
+
   let updatedCount = 0;
   matchingRows.forEach(rowNum => {
     const language = sheet.getRange(rowNum, langIdx + 1).getValue();
@@ -1132,6 +1146,8 @@ function handleStatusReply(chatId, text, replyToMessageId) {
     ? '✅ Updated ' + updatedCount + ' posted version(s) to: ' + banner.replace(/^[^\s]+\s/, '')
     : "🤔 Found that listing, but nothing was actually posted for it (all versions were rejected?).");
   if (websiteChange && websiteChange.newPrice > 0 && websiteChange.id > 0) startPriceUpdate(chatId, websiteChange);
+  if (soldChange && soldChange.id > 0) startUnitStatus(chatId, soldChange);
+  if (!postRef && updatedCount) offerCreatePage(chatId, pageOffer, STATUS_LABELS[upper] ? null : true);
 }
 
 function editPostedMessage(chatId, messageId, newText, hasPhoto) {
@@ -1698,6 +1714,7 @@ function dryRunIntake(payload) {
     return { code: 200, body: { ok: true, id: payload.id, title: 'Dry Run Tower · 1 Bedroom · Floor 6', price: 62000, status: 'active', listingType: 'resale', bedrooms: 1, bathrooms: 1, sqm: 40, floor: '6', location: 'BKK1', city: 'Phnom Penh', refCode: 'DRT-' + (payload.id + 1000), url: 'DRY RUN (no page)' } };
   }
   if (payload.action === 'price') return { code: 200, body: { ok: true, id: payload.id, oldPrice: payload.expectedOldPrice, newPrice: payload.newPrice } };
+  if (payload.action === 'status') return { code: 200, body: { ok: true, id: payload.id, status: payload.newStatus } };
   return { code: 200, body: { ok: true, removed: 0 } };
 }
 
@@ -2046,6 +2063,8 @@ function routeIncoming(chatId, text, photoFileIds, isForwarded, sourceUsername, 
   // 2b. a price change for a unit that is already on the website ("TS10-1021 price reduced to $58,500")
   const priceChange = parsePriceUpdate(text);
   if (priceChange) { startPriceUpdate(chatId, priceChange); return true; }
+  const statusChange = parseUnitStatusText(text);
+  if (statusChange) { startUnitStatus(chatId, statusChange); return true; }
 
   // 3. photos sent earlier without any text, now followed by the post text
   //    (a post longer than Telegram's 1,024 character caption limit has to go as a separate message)
@@ -2723,6 +2742,90 @@ function handlePriceCallback(cb, rest) {
     if (st.status !== 'active') { sendTelegramMessage(chatId, 'The page is not live, so I did not prepare channel posts.'); return; }
     processChannelListing(chatId, priceDropChannelText(st), [], false, null, null, st.url, st.ref);
   }
+}
+
+// ── Sold / rented: take a unit off the website ──────────────────────────────────────
+// "SOLD TS10-1021" (typed), or the existing SOLD / RENTED reply to a post that carries a Ref. The bot shows a card and
+// changes the website only after a tap. A sold or rented unit disappears from every public page.
+
+function unitStatusCache(id, verb) { return 'unitstat_' + id + '_' + verb; }
+
+function parseUnitStatusText(text) {
+  const t = String(text || '').trim();
+  const m = t.match(/^[#\/]?\s*(sold|rented)\s*[:=]?\s+(?:ref\s*)?(?=[A-Za-z][A-Za-z0-9]{0,5}-\d{4,6}\b)/i);
+  if (!m) return null;
+  const ref = t.slice(m[0].length).match(/^([A-Za-z][A-Za-z0-9]{0,5})-(\d{4,6})\b/);
+  if (!ref) return null;
+  const n = parseInt(ref[2], 10) - 1000;
+  if (!(n > 0)) return null;
+  return { verb: m[1].toLowerCase(), id: n, ref: ref[0] };
+}
+
+function startUnitStatus(chatId, sc) {
+  chatId = String(chatId);
+  const r = callIntake({ action: 'lookup', id: sc.id });
+  if (r.code === 404) { sendTelegramMessage(chatId, 'I could not find a single unit with the number ' + sc.ref + '. Project pages are never changed this way.'); return; }
+  if (r.code !== 200 || !r.body || !r.body.ok) { sendTelegramMessage(chatId, 'The website did not answer (' + r.code + '). Nothing was changed. Try again in a minute.'); return; }
+  const u = r.body;
+  const word = sc.verb === 'rented' ? 'Rented' : 'Sold';
+  if (u.status !== 'active') {
+    sendTelegramMessage(chatId, u.refCode + ' is not live on the website (' + (u.status === 'draft' ? 'hidden draft' : u.status) + '), so there is nothing to mark as ' + word.toLowerCase() + '.');
+    return;
+  }
+  const st = { unitId: u.id, ref: u.refCode, title: u.title, verb: sc.verb, used: null };
+  unitCache().put(unitStatusCache(u.id, sc.verb), JSON.stringify(st), UNIT_CACHE_SECONDS);
+  unitSessionTouch();
+  sendTelegramMessage(chatId,
+    'Found ' + u.refCode + ': ' + u.title + '\n' + formatUsd(u.price) + (u.listingType === 'rent' ? '/month' : '') + '\n\nMark it as ' + word.toLowerCase() + '? Its page will disappear from the website (it can be brought back in the admin).',
+    { inline_keyboard: [[{ text: 'Mark as ' + word + ' on website', callback_data: 'ustat_' + u.id + '_' + sc.verb + '_go' }, { text: 'Cancel', callback_data: 'ustat_' + u.id + '_' + sc.verb + '_no' }]] });
+}
+
+function handleUnitStatusCallback(cb, rest) {
+  const chatId = cb.message && cb.message.chat ? String(cb.message.chat.id) : '';
+  if (chatId !== REVIEWER_CHAT_ID) { answerCallback(cb.id, 'Not allowed.'); return; }
+  const parts = String(rest).split('_');
+  const raw = unitCache().get(unitStatusCache(parts[0], parts[1]));
+  const st = raw ? JSON.parse(raw) : null;
+  const messageId = cb.message.message_id;
+  if (!st) { answerCallback(cb.id, 'This question expired. Send it again.'); return; }
+  if (st.used) { answerCallback(cb.id, 'Already handled.'); return; }
+  unitSessionTouch();
+  if (parts[2] === 'no') {
+    st.used = 'no'; unitCache().put(unitStatusCache(st.unitId, st.verb), JSON.stringify(st), UNIT_CACHE_SECONDS);
+    answerCallback(cb.id, 'Cancelled.');
+    editUnitMessage(chatId, messageId, 'Cancelled. The website was not changed.', null);
+    return;
+  }
+  if (parts[2] !== 'go') { answerCallback(cb.id, ''); return; }
+  st.used = 'go'; unitCache().put(unitStatusCache(st.unitId, st.verb), JSON.stringify(st), UNIT_CACHE_SECONDS);
+  const r = callIntake({ action: 'status', id: st.unitId, expectedStatus: 'active', newStatus: st.verb });
+  if (r.code !== 200 || !r.body || !r.body.ok) {
+    st.used = null; unitCache().put(unitStatusCache(st.unitId, st.verb), JSON.stringify(st), UNIT_CACHE_SECONDS);
+    answerCallback(cb.id, 'Failed.');
+    editUnitMessage(chatId, messageId, r.code === 409 ? 'Nothing was changed. The unit is no longer live on the website.' : 'The website did not accept the change (' + r.code + '). Nothing was changed. Send it again to retry.', null);
+    return;
+  }
+  answerCallback(cb.id, 'Done.');
+  editUnitMessage(chatId, messageId, 'Done. ' + st.ref + ' is marked as ' + st.verb + ' and is off the website.', null);
+}
+
+// A channel only post (no Ref) can become a website page with one tap. The saved post text and photos start the normal draft.
+function offerCreatePage(chatId, offer, allowCreate) {
+  chatId = String(chatId);
+  if (!allowCreate || !offer || !offer.content) {
+    sendTelegramMessage(chatId, 'This post has no page on the website, so only the channel changed.');
+    return;
+  }
+  let text = offer.content;
+  if (offer.amount) {
+    const newPrice = parseMoneyAmount(offer.amount[1], offer.amount[2]);
+    if (newPrice > 0) text = text.replace(/\$\s*\d[\d,]*(?:\.\d+)?\s*[km]?/i, formatUsd(newPrice)); // the new price replaces the first (main) price
+  }
+  const m = { id: newUnitDraftId(), orig: { text: text, photoIds: offer.photoIds || [], isForwarded: false, sourceUsername: null, entities: null }, images: offer.photoIds || [], mediaGroupId: null, used: null };
+  saveUnitMenu(m);
+  unitSessionTouch();
+  sendTelegramMessage(chatId, 'This post has no page on the website, so only the channel changed.\nCreate a website page from this post?',
+    { inline_keyboard: [[{ text: 'Create a website page from this post', callback_data: 'menu_' + m.id + '_site' }]] });
 }
 
 // The channel post for a changed price, in the template the existing flow already reads.
