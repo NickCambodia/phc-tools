@@ -196,7 +196,10 @@ function pollTelegramOnce(timeoutSeconds) {
 
   Object.keys(mediaGroups).forEach(gid => {
     const g = mediaGroups[gid];
-    try { handleIncomingMessage(g.chatId, g.captionText, g.photoIds, g.isForwarded, g.sourceUsername, g.captionEntities, g.imageIds); }
+    // Telegram can deliver one album in two batches. If the caption (#unit) came in an earlier batch,
+    // these captionless photos belong to that draft: add them quietly, never run the listing flow on them.
+    if (!g.captionText && unitAddLateAlbumPhotos(g.chatId, gid, g.imageIds)) return;
+    try { handleIncomingMessage(g.chatId, g.captionText, g.photoIds, g.isForwarded, g.sourceUsername, g.captionEntities, g.imageIds, gid); }
     catch (err) { Logger.log('handleIncomingMessage(group) error: ' + err); }
   });
 }
@@ -291,12 +294,12 @@ function getMessageEntities(m) {
 
 // ── Incoming message handling (listing detection) ──────────────────
 
-function handleIncomingMessage(chatId, text, photoFileIds, isForwarded, sourceUsername, originalEntities, imageFileIds) {
+function handleIncomingMessage(chatId, text, photoFileIds, isForwarded, sourceUsername, originalEntities, imageFileIds, mediaGroupId) {
   if (String(chatId) !== REVIEWER_CHAT_ID) return; // only from you, in your private chat with the bot
 
   // Unit intake (see the UNIT INTAKE section at the bottom): only messages tagged #unit or /unit,
   // plus the plain-text reply that names a new building. Everything else continues below unchanged.
-  if (isUnitIntakeText(text)) { handleUnitIntake(chatId, text, imageFileIds && imageFileIds.length ? imageFileIds : (photoFileIds || [])); return; }
+  if (isUnitIntakeText(text)) { handleUnitIntake(chatId, text, imageFileIds && imageFileIds.length ? imageFileIds : (photoFileIds || []), mediaGroupId); return; }
   if (isAwaitingUnitName(chatId, text, isForwarded)) { handleUnitNameReply(chatId, text); return; }
 
   // Anything forwarded straight from your own channel is trusted outright —
@@ -1688,7 +1691,7 @@ function describeIntakeFailure(res, what) {
 
 // ── Step 1: the #unit message arrives ───────────────────────────────
 
-function handleUnitIntake(chatId, text, imageFileIds) {
+function handleUnitIntake(chatId, text, imageFileIds, mediaGroupId) {
   chatId = String(chatId); // Telegram only accepts the chat id as text from Apps Script (a Number goes out as "3.5E8" and fails with "chat not found")
   const facts = parseUnitText(text);
   const images = (imageFileIds || []).slice(0, UNIT_MAX_PHOTOS);
@@ -1708,6 +1711,7 @@ function handleUnitIntake(chatId, text, imageFileIds) {
     parentId: null, buildingName: null, title: null, features: [], messageId: null,
   };
   saveUnitDraft(d);
+  if (mediaGroupId) unitCache().put('unitgroup_' + mediaGroupId, d.id, UNIT_CACHE_SECONDS); // so a late photo of this album can still join
   unitSessionTouch();
   sendTelegramMessage(chatId,
     'Got ' + images.length + ' photo' + (images.length === 1 ? '' : 's') + (facts.video ? ' and a video link' : '') + '. Is this building already on the website?',
@@ -1806,6 +1810,21 @@ function handleUnitCallback(cb, rest) {
     return;
   }
   answerCallback(cb.id, '');
+}
+
+// Returns true if these photos belong to an album whose #unit caption was already handled.
+function unitAddLateAlbumPhotos(chatId, mediaGroupId, imageIds) {
+  const draftId = unitCache().get('unitgroup_' + mediaGroupId);
+  if (!draftId) return false;
+  const d = loadUnitDraft(draftId);
+  if (!d) return true; // the draft was cancelled or expired: drop the stray photos quietly
+  if (d.step === 'running' || d.step === 'done') {
+    sendTelegramMessage(String(chatId), 'One more photo from that album arrived after I had started creating the page, so it is not included. Add it later in the admin if you need it.');
+    return true;
+  }
+  (imageIds || []).forEach(function (f) { if (d.images.indexOf(f) === -1 && d.images.length < UNIT_MAX_PHOTOS) d.images.push(f); });
+  saveUnitDraft(d);
+  return true;
 }
 
 // ── Step 3: the summary card with the facilities tick-list ──────────
