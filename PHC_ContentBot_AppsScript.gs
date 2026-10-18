@@ -104,6 +104,23 @@ const HEADERS = ['id', 'createdAt', 'language', 'content', 'status', 'reviewMsgI
 // ── Polling — checks Telegram for new messages/button taps every minute ─
 
 function checkForUpdates() {
+  // One run at a time: a fast-mode run can last most of a minute, and two pollers
+  // would otherwise handle the same button tap twice.
+  const lock = LockService.getUserLock();
+  if (!lock.tryLock(3000)) { Logger.log('checkForUpdates: previous run still busy, skipping'); return; }
+  try {
+    pollTelegramOnce(0);
+    // FAST MODE: while a #unit draft is in progress, keep listening (Telegram "long polling")
+    // for the rest of this minute so taps are answered in seconds, not at the next 1-minute tick.
+    // It switches itself off 10 minutes after the last tap (see unitSessionTouch).
+    const stopAt = Date.now() + 40000;
+    while (isUnitSessionActive() && Date.now() < stopAt) pollTelegramOnce(5);
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function pollTelegramOnce(timeoutSeconds) {
   const token = PropertiesService.getScriptProperties().getProperty('BOT_TOKEN');
   const props = PropertiesService.getScriptProperties();
   const lastOffset = Number(props.getProperty('LAST_UPDATE_OFFSET') || '0');
@@ -114,12 +131,12 @@ function checkForUpdates() {
   // elsewhere (message, callback_query, channel_post) has to be included too.
   const allowedUpdates = encodeURIComponent(JSON.stringify(['message', 'callback_query', 'channel_post', 'message_reaction_count']));
   const resp = UrlFetchApp.fetch(
-    'https://api.telegram.org/bot' + token + '/getUpdates?offset=' + (lastOffset + 1) + '&timeout=0&allowed_updates=' + allowedUpdates,
+    'https://api.telegram.org/bot' + token + '/getUpdates?offset=' + (lastOffset + 1) + '&timeout=' + timeoutSeconds + '&allowed_updates=' + allowedUpdates,
     { muteHttpExceptions: true }
   );
   const data = JSON.parse(resp.getContentText());
   if (!data.ok) { Logger.log('getUpdates failed: ' + resp.getContentText()); return; }
-  Logger.log('Fetched ' + data.result.length + ' update(s), offset=' + (lastOffset + 1));
+  if (timeoutSeconds === 0 || data.result.length) Logger.log('Fetched ' + data.result.length + ' update(s), offset=' + (lastOffset + 1));
   if (!data.result.length) return;
 
   // Multi-photo listings arrive as an "album" — each photo as its own message,
@@ -1594,6 +1611,13 @@ function loadUnitDraft(id) {
   return raw ? JSON.parse(raw) : null;
 }
 
+// A "session" is open from the #unit message until the draft is created or cancelled
+// (or 10 minutes after the last tap). While it is open, checkForUpdates listens continuously.
+const UNIT_SESSION_SECONDS = 600;
+function unitSessionTouch() { unitCache().put('unitsession', '1', UNIT_SESSION_SECONDS); }
+function unitSessionEnd() { unitCache().remove('unitsession'); }
+function isUnitSessionActive() { return !!unitCache().get('unitsession'); }
+
 function newUnitDraftId() {
   return Utilities.getUuid().replace(/-/g, '').slice(0, 6);
 }
@@ -1684,6 +1708,7 @@ function handleUnitIntake(chatId, text, imageFileIds) {
     parentId: null, buildingName: null, title: null, features: [], messageId: null,
   };
   saveUnitDraft(d);
+  unitSessionTouch();
   sendTelegramMessage(chatId,
     'Got ' + images.length + ' photo' + (images.length === 1 ? '' : 's') + (facts.video ? ' and a video link' : '') + '. Is this building already on the website?',
     { inline_keyboard: [[
@@ -1710,6 +1735,7 @@ function handleUnitNameReply(chatId, text) {
   d.parentId = null;
   d.step = 'summary';
   saveUnitDraft(d);
+  unitSessionTouch();
   showUnitSummary(chatId, d, null);
 }
 
@@ -1723,9 +1749,11 @@ function handleUnitCallback(cb, rest) {
   const d = loadUnitDraft(id);
   if (!d) { answerCallback(cb.id, 'This draft expired. Send the #unit message again.'); return; }
   const messageId = cb.message.message_id;
+  unitSessionTouch();
 
   if (verb === 'x') {
     unitCache().remove('unitdraft_' + id);
+    unitSessionEnd();
     answerCallback(cb.id, 'Cancelled.');
     editUnitMessage(chatId, messageId, 'Cancelled. Nothing was created.', null);
     return;
@@ -1886,6 +1914,7 @@ function runUnitCreate(chatId, id, messageId) {
 
   d.step = 'done';
   saveUnitDraft(d);
+  unitSessionEnd();
   sendTelegramMessage(chatId,
     (isUnitDryRun() ? '[DRY RUN] ' : '') + 'Hidden draft created. Nobody else can see it yet.\n\n' +
     title + '\n\nPreview link:\n' + created.body.previewUrl + '\n\n' +
