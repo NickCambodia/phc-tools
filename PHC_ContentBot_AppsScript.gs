@@ -821,6 +821,10 @@ function handleCallback(cb) {
     handleUnitCallback(cb, id); // buttons of the website draft (callback_data "unit_<draftId>_<verb>")
     return;
   }
+  if (action === 'price') {
+    handlePriceCallback(cb, id); // buttons of a price update (callback_data "price_<unitId>_<verb>")
+    return;
+  }
   if (action === 'approveAll' || action === 'rejectAll') {
     handleGroupCallback(cb, action, id);
     return;
@@ -1680,6 +1684,10 @@ function dryRunIntake(payload) {
   if (payload.action === 'create') {
     return { code: 200, body: { ok: true, id: 0, slug: 'dry-run', refCode: 'DRY-RUN', previewUrl: 'DRY RUN (no page was created)' } };
   }
+  if (payload.action === 'lookup') {
+    return { code: 200, body: { ok: true, id: payload.id, title: 'Dry Run Tower · 1 Bedroom · Floor 6', price: 62000, status: 'active', listingType: 'resale', bedrooms: 1, bathrooms: 1, sqm: 40, floor: '6', location: 'BKK1', city: 'Phnom Penh', refCode: 'DRT-' + (payload.id + 1000), url: 'DRY RUN (no page)' } };
+  }
+  if (payload.action === 'price') return { code: 200, body: { ok: true, id: payload.id, oldPrice: payload.expectedOldPrice, newPrice: payload.newPrice } };
   return { code: 200, body: { ok: true, removed: 0 } };
 }
 
@@ -2024,6 +2032,10 @@ function routeIncoming(chatId, text, photoFileIds, isForwarded, sourceUsername, 
 
   // 2. the tag skips the question: straight to a website draft
   if (isUnitIntakeText(text)) { startWebsiteDraft(chatId, text, images, mediaGroupId, orig, 'site'); return true; }
+
+  // 2b. a price change for a unit that is already on the website ("TS10-1021 price reduced to $58,500")
+  const priceChange = parsePriceUpdate(text);
+  if (priceChange) { startPriceUpdate(chatId, priceChange); return true; }
 
   // 3. photos sent earlier without any text, now followed by the post text
   //    (a post longer than Telegram's 1,024 character caption limit has to go as a separate message)
@@ -2562,6 +2574,156 @@ function handleUnitChannelTap(cb, chatId, messageId, d) {
   const original = d.orig && /#ForSale|#ForRent|#NewProject/i.test(d.orig.text || '') ? d.orig.text : unitFactsToChannelText(d);
   const photoIds = d.orig && d.orig.photoIds && d.orig.photoIds.length ? d.orig.photoIds : [];
   processChannelListing(chatId, original, photoIds, false, null, null, pageUrl, d.created.refCode);
+}
+
+// ── Price update: change the price of a unit that is already on the website ─────────
+// Nick sends e.g. "TS10-1021 price reduced to $58,500". The bot finds the unit by its number, shows old and new, and
+// changes the price only after a tap. The website keeps the old price in its history.
+
+const PRICE_BIG_CHANGE = 0.15; // a change bigger than this must be confirmed a second time (a typo guard)
+
+function priceCache(id) { return 'unitprice_' + id; }
+function loadPriceState(id) { const raw = unitCache().get(priceCache(id)); return raw ? JSON.parse(raw) : null; }
+function savePriceState(st) { unitCache().put(priceCache(st.unitId), JSON.stringify(st), UNIT_CACHE_SECONDS); }
+
+function parseMoneyAmount(num, suffix) {
+  let v = parseFloat(String(num).replace(/,/g, ''));
+  if (isNaN(v)) return null;
+  const sx = String(suffix || '').toLowerCase();
+  if (sx === 'k') v *= 1000;
+  if (sx === 'm') v *= 1000000;
+  return Math.round(v);
+}
+
+// Returns {id, ref, newPrice} when the text is a price change for a numbered unit, otherwise null.
+function parsePriceUpdate(text) {
+  const t = String(text || '');
+  const tagged = /(^|\s)[#\/]price\b/i.test(t);
+  const wording = /\bprice\s*(drop|dropped|reduc\w*|cut|change\w*|update\w*|down|lowered)\b|\breduced\b|\bnew\s+price\b|\bprice\s+now\b|\bnow\s+\$|\blowered\b|\bdropped\s+to\b/i.test(t);
+  if (!tagged && !wording) return null;
+  const refMatch = t.match(/\b([A-Za-z][A-Za-z0-9]{0,5})-(\d{4,6})\b/) || (tagged ? t.match(/(?:^|\s)(\d{4,6})\b/) : null);
+  if (!refMatch) return null;
+  const digits = parseInt(refMatch[refMatch.length - 1], 10);
+  if (!(digits > 1000)) return null;
+  const rest = t.replace(refMatch[0], ' ');
+  const amounts = [];
+  const re = /\$\s*(\d[\d,]*(?:\.\d+)?)\s*([km])?(?![a-z0-9])/gi;
+  let m;
+  while ((m = re.exec(rest))) {
+    const before = rest.slice(Math.max(0, m.index - 14), m.index).toLowerCase();
+    amounts.push({ value: parseMoneyAmount(m[1], m[2]), old: /(was|from|before|old|instead of)\W*$/.test(before), after: /(to|now|new price|price)\W*$/.test(before) });
+  }
+  let chosen = amounts.filter(function (a) { return !a.old; });
+  if (chosen.length > 1) { const pointed = chosen.filter(function (a) { return a.after; }); if (pointed.length) chosen = pointed; }
+  let newPrice = chosen.length ? chosen[chosen.length - 1].value : null;
+  if (newPrice === null && tagged) {
+    const bare = rest.match(/(?:^|\s)(\d[\d,]{2,})\s*([km])?(?![a-z0-9])/i);
+    if (bare) newPrice = parseMoneyAmount(bare[1], bare[2]);
+  }
+  return { id: digits - 1000, ref: refMatch[0], newPrice: newPrice };
+}
+
+function startPriceUpdate(chatId, pu) {
+  chatId = String(chatId);
+  if (!pu.newPrice) {
+    sendTelegramMessage(chatId, 'I found ' + pu.ref + ' but not the new price.\nExample: ' + pu.ref + ' price reduced to $58,500');
+    return;
+  }
+  const r = callIntake({ action: 'lookup', id: pu.id });
+  if (r.code === 404) {
+    sendTelegramMessage(chatId, 'I could not find a single unit with the number ' + pu.ref + '. Project pages are never changed this way.');
+    return;
+  }
+  if (r.code !== 200 || !r.body || !r.body.ok) {
+    sendTelegramMessage(chatId, 'The website did not answer (' + r.code + '). Nothing was changed. Try again in a minute.');
+    return;
+  }
+  const u = r.body;
+  const suffix = u.listingType === 'rent' ? '/month' : '';
+  if (u.price === pu.newPrice) {
+    sendTelegramMessage(chatId, u.refCode + ' is already ' + formatUsd(u.price) + suffix + ' on the website. Nothing to change.');
+    return;
+  }
+  const change = (pu.newPrice - u.price) / u.price;
+  const pct = Math.abs(change * 100).toFixed(1).replace(/\.0$/, '');
+  const st = {
+    unitId: u.id, ref: u.refCode, title: u.title, oldPrice: u.price, newPrice: pu.newPrice, status: u.status, listingType: u.listingType,
+    url: u.url, bedrooms: u.bedrooms, bathrooms: u.bathrooms, sqm: u.sqm, floor: u.floor, location: u.location, city: u.city,
+    big: Math.abs(change) > PRICE_BIG_CHANGE, confirmed: false, used: null,
+  };
+  savePriceState(st);
+  unitSessionTouch();
+  const live = u.status === 'active';
+  let text = 'Found ' + u.refCode + ': ' + u.title + '\n' + formatUsd(u.price) + suffix + ' to ' + formatUsd(pu.newPrice) + suffix + ' (' + (change < 0 ? 'down ' : 'up ') + pct + '%)\n' +
+    (live ? 'Live on the website now.' : 'This page is not live yet (' + (u.status === 'draft' ? 'hidden draft' : u.status) + '). Only the price is saved.');
+  if (st.big) text += '\n\nThis is a change of more than 15%. Please check the new price is not a typo. I will ask you to confirm once more.';
+  sendTelegramMessage(chatId, text, priceKeyboard(st));
+}
+
+function priceKeyboard(st) {
+  const rows = [[{ text: 'Update website price', callback_data: 'price_' + st.unitId + '_go' }]];
+  if (st.status === 'active') rows[0].push({ text: 'Update and post', callback_data: 'price_' + st.unitId + '_post' });
+  rows.push([{ text: 'Cancel', callback_data: 'price_' + st.unitId + '_no' }]);
+  return { inline_keyboard: rows };
+}
+
+function handlePriceCallback(cb, rest) {
+  const chatId = cb.message && cb.message.chat ? String(cb.message.chat.id) : '';
+  if (chatId !== REVIEWER_CHAT_ID) { answerCallback(cb.id, 'Not allowed.'); return; }
+  const parts = String(rest).split('_');
+  const st = loadPriceState(parts[0]);
+  const verb = parts[1];
+  const messageId = cb.message.message_id;
+  if (!st) { answerCallback(cb.id, 'This question expired. Send the price again.'); return; }
+  if (st.used) { answerCallback(cb.id, 'Already handled.'); return; }
+  unitSessionTouch();
+  if (verb === 'no') {
+    st.used = 'no'; savePriceState(st);
+    answerCallback(cb.id, 'Cancelled.');
+    editUnitMessage(chatId, messageId, 'Cancelled. The price was not changed.', null);
+    return;
+  }
+  if (verb !== 'go' && verb !== 'post') { answerCallback(cb.id, ''); return; }
+  if (st.big && !st.confirmed) {
+    st.confirmed = true; savePriceState(st);
+    answerCallback(cb.id, 'Please confirm.');
+    editUnitMessage(chatId, messageId,
+      'Please confirm: ' + st.ref + ' from ' + formatUsd(st.oldPrice) + ' to ' + formatUsd(st.newPrice) + '. That is a big change. Tap again to apply it.', priceKeyboard(st));
+    return;
+  }
+  st.used = verb; savePriceState(st);
+  const r = callIntake({ action: 'price', id: st.unitId, expectedOldPrice: st.oldPrice, newPrice: st.newPrice });
+  if (r.code === 409) {
+    st.used = null; savePriceState(st);
+    answerCallback(cb.id, 'The price changed meanwhile.');
+    const now = r.body && r.body.currentPrice ? ' It is now ' + formatUsd(r.body.currentPrice) + '.' : '';
+    editUnitMessage(chatId, messageId, 'Nothing was changed. The price on the website was changed by someone else.' + now + ' Send the new price again.', null);
+    return;
+  }
+  if (r.code !== 200 || !r.body || !r.body.ok) {
+    st.used = null; savePriceState(st);
+    answerCallback(cb.id, 'Failed.');
+    editUnitMessage(chatId, messageId, 'The website did not accept the change (' + r.code + '). Nothing was changed. Tap again to retry.', priceKeyboard(st));
+    return;
+  }
+  answerCallback(cb.id, 'Price updated.');
+  const suffix = st.listingType === 'rent' ? '/month' : '';
+  editUnitMessage(chatId, messageId, 'Done. ' + st.ref + ' is now ' + formatUsd(st.newPrice) + suffix + ' on the website (was ' + formatUsd(st.oldPrice) + suffix + '). The old price is kept in the history.', null);
+  if (verb === 'post') {
+    if (st.status !== 'active') { sendTelegramMessage(chatId, 'The page is not live, so I did not prepare channel posts.'); return; }
+    processChannelListing(chatId, priceDropChannelText(st), [], false, null, null, st.url, st.ref);
+  }
+}
+
+// The channel post for a changed price, in the template the existing flow already reads.
+function priceDropChannelText(st) {
+  const building = String(st.title).split(' · ')[0];
+  const studio = /studio/i.test(st.title) && !st.bedrooms;
+  const facts = { price: st.newPrice, listingType: st.listingType, bedrooms: studio ? 0 : (st.bedrooms || null), bathrooms: st.bathrooms || null, sqm: st.sqm || 0, floor: st.floor || null };
+  const d = { facts: facts, buildingName: building, location: st.location, city: st.city, features: [], extraFeatures: [], parentId: 1 };
+  const text = unitFactsToChannelText(d);
+  if (st.newPrice < st.oldPrice) return text + '\n✅ Price reduced from ' + formatUsd(st.oldPrice) + (st.listingType === 'rent' ? '/month' : '');
+  return text;
 }
 
 // Adds the live page link and the reference code to a finished channel post, just above the contact block.
