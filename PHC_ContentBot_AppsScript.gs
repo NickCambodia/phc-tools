@@ -2119,6 +2119,8 @@ function startWebsiteDraft(chatId, text, imageFileIds, mediaGroupId, orig, route
 function advanceUnitDraft(chatId, d, messageId) {
   if (!d.buildingName) { d.step = 'building'; saveUnitDraft(d); return askUnitBuilding(chatId, d, messageId); }
   if (!d.parentId && !d.location) { d.step = 'area'; saveUnitDraft(d); return askUnitArea(chatId, d, messageId); }
+  const noRooms = d.propertyType === 'Land' || d.propertyType === 'Commercial';
+  if (d.facts.bedrooms === null && !d.bedroomsAsked && !noRooms) { d.step = 'bedrooms'; d.bedroomsAsked = true; saveUnitDraft(d); return askUnitBedrooms(chatId, d, messageId); }
   if (!d.propertyType) {
     const f = d.facts;
     if ((f.floor || f.unitNumber) && f.bedrooms !== null) { d.propertyType = 'Condo'; d.typeAssumed = true; }
@@ -2152,6 +2154,16 @@ function askUnitArea(chatId, d, messageId) {
   }
   rows.push([{ text: 'Cancel', callback_data: 'unit_' + d.id + '_x' }]);
   unitSay(chatId, messageId, d.buildingName + ' is not on the website yet. Which area is it in?', { inline_keyboard: rows });
+}
+
+function askUnitBedrooms(chatId, d, messageId) {
+  const labels = ['Studio', '1 bedroom', '2 bedrooms', '3 bedrooms', '4 bedrooms', '5 or more'];
+  const rows = [];
+  for (let i = 0; i < labels.length; i += 3) {
+    rows.push(labels.slice(i, i + 3).map(function (l, k) { return { text: l, callback_data: 'unit_' + d.id + '_b_' + (i + k) }; }));
+  }
+  rows.push([{ text: 'Skip, not sure', callback_data: 'unit_' + d.id + '_b_s' }, { text: 'Cancel', callback_data: 'unit_' + d.id + '_x' }]);
+  unitSay(chatId, messageId, 'Your post does not say the bedrooms. How many bedrooms?', { inline_keyboard: rows });
 }
 
 function askUnitType(chatId, d, messageId) {
@@ -2251,6 +2263,20 @@ function handleUnitCallback(cb, rest) {
       return;
     }
     d.location = area; d.city = d.city || 'Phnom Penh';
+    saveUnitDraft(d);
+    advanceUnitDraft(chatId, d, messageId);
+    return;
+  }
+  if (verb === 'b') {
+    if (arg !== 's') {
+      const n = parseInt(arg, 10);
+      if (isNaN(n) || n < 0 || n > 5) { answerCallback(cb.id, ''); return; }
+      d.facts.bedrooms = n;
+      answerCallback(cb.id, n === 0 ? 'Studio' : n + (n === 1 ? ' bedroom' : ' bedrooms'));
+    } else {
+      answerCallback(cb.id, 'Skipped.');
+    }
+    d.title = null; // the title depends on the bedrooms
     saveUnitDraft(d);
     advanceUnitDraft(chatId, d, messageId);
     return;
