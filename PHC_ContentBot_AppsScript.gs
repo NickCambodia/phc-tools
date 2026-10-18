@@ -161,6 +161,7 @@ function pollTelegramOnce(timeoutSeconds) {
       catch (err) { Logger.log('handleReactionUpdate error: ' + err); }
     } else if (update.message) {
       const m = update.message;
+      if (m.date) LAST_MESSAGE_LAG_S = Math.max(0, Math.round(Date.now() / 1000 - m.date));
       let handledAsUnitReply = false;
       try { handledAsUnitReply = handleUnitReply(m); }
       catch (err) { Logger.log('handleUnitReply error: ' + err); }
@@ -311,8 +312,14 @@ function handleIncomingMessage(chatId, text, photoFileIds, isForwarded, sourceUs
 
 // The original listing flow (forward or paste a listing, EN/JP/RU/DE versions, your approval, then post).
 // pageUrl and refCode are only given by the "Both" route, to add the live page link and reference to each post.
+// Temporary timing report: set the script property DEBUG_TIMING to 1 and the bot tells you where the time went.
+function debugTiming() { return PropertiesService.getScriptProperties().getProperty('DEBUG_TIMING') === '1'; }
+let LAST_MESSAGE_LAG_S = null; // seconds between you sending a message and the bot first seeing it
+
 function processChannelListing(chatId, text, photoFileIds, isForwarded, sourceUsername, originalEntities, pageUrl, refCode) {
   if (String(chatId) !== REVIEWER_CHAT_ID) return; // only from you, in your private chat with the bot
+  const T0 = Date.now(), marks = [];
+  const mark = function (label) { marks.push(label + ' ' + ((Date.now() - T0) / 1000).toFixed(1) + 's'); };
 
   // Anything forwarded straight from your own channel is trusted outright —
   // no hashtag/shape check at all. It's not always a single-property listing
@@ -381,14 +388,17 @@ function processChannelListing(chatId, text, photoFileIds, isForwarded, sourceUs
     }
   }
 
+  mark('read the post');
   const sourceId = 'L' + Date.now();
   const sheet = getQueueSheet();
   const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  mark('opened the sheet');
   const photoJson = photoFileIds && photoFileIds.length ? JSON.stringify(photoFileIds) : '';
   const photoCount = photoFileIds ? photoFileIds.length : 0;
 
   sendTelegramMessage(REVIEWER_CHAT_ID, '📥 Listing detected (' + photoCount + ' photo' + (photoCount === 1 ? '' : 's') + ') — generating EN/JP/RU/DE versions for your review...');
 
+  mark('sent "Listing detected"');
   // Own-channel forwards carry their own contact info (Nick's personal
   // phone/Telegram) — strip it so CONTACT_STANDARD (PHC's own number/channel)
   // is what every post shows, same as every other source path. Text is
@@ -432,12 +442,16 @@ function processChannelListing(chatId, text, photoFileIds, isForwarded, sourceUs
     sheet.getRange(rowNum, 1, 1, row.length).setValues([row]);
     if (lang === 'EN') {
       // One review message covering all 4 languages: approving posts to all channels at once (same listing, translated).
+      mark('EN row written');
       reviewMsg = sendCombinedReviewMessage(sheet, headers, sourceId, photoFileIds);
+      mark('REVIEW SENT');
     } else if (reviewMsg) {
       sheet.getRange(rowNum, headers.indexOf('status') + 1).setValue('Pending Review');
       sheet.getRange(rowNum, headers.indexOf('reviewMsgId') + 1).setValue(reviewMsg.message_id || '');
     }
   });
+  mark('all languages done');
+  if (debugTiming()) sendTelegramMessage(REVIEWER_CHAT_ID, 'Timing (seconds from the start of preparing)\n' + marks.join('\n') + '\nRows in the queue sheet: ' + sheet.getLastRow() + (LAST_MESSAGE_LAG_S !== null ? '\nYour last message waited ' + LAST_MESSAGE_LAG_S + 's before the bot saw it' : ''));
 }
 
 // Reads the photoFileId cell, which may be a JSON array (multi-photo) or,
