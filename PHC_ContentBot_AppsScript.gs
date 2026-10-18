@@ -2375,28 +2375,6 @@ function unitAddLateAlbumPhotos(chatId, mediaGroupId, imageIds, photoIds) {
 
 // ── Step 3: the summary ─────────────────────────────────────────────
 
-// The facility list of the building (project) a unit is linked to, read from the public site. [] if unavailable.
-function fetchParentFeatures(parentId) {
-  try {
-    const resp = UrlFetchApp.fetch(SUPABASE_REST_URL + '/properties?select=features&id=eq.' + parentId, {
-      headers: { apikey: SUPABASE_PUBLISHABLE_KEY, Authorization: 'Bearer ' + SUPABASE_PUBLISHABLE_KEY },
-      muteHttpExceptions: true,
-    });
-    if (resp.getResponseCode() !== 200) return [];
-    const rows = JSON.parse(resp.getContentText());
-    return rows.length && rows[0].features ? rows[0].features : [];
-  } catch (e) { return []; }
-}
-
-function mergeUnitFeatures(first, second) {
-  const out = [];
-  (first || []).concat(second || []).forEach(function (x) {
-    const low = String(x).toLowerCase();
-    if (x && !out.some(function (y) { return y.toLowerCase() === low; })) out.push(x);
-  });
-  return out.slice(0, 30);
-}
-
 function unitFinalFeatures(d) {
   const out = [];
   (d.extraFeatures || []).concat(d.features || []).forEach(function (x) {
@@ -2433,7 +2411,7 @@ function unitSummaryText(d) {
   const claim = feats.filter(function (x) { return /strata|hard title|soft title|freehold|guarantee|yield|roi|return/i.test(x); });
   if (claim.length) lines.push('Claim to verify before going live: ' + claim.join(', '));
   lines.push('');
-  lines.push('Facilities: ' + (d.features.length ? d.features.length + ' ticked' : (d.parentId ? 'none ticked, so the building\'s own list is added' : 'tick the facilities this unit has')));
+  lines.push('Facilities: ' + (d.features.length ? d.features.length + ' ticked' : (d.parentId ? 'none ticked. The building\'s own facilities show automatically; tick any extra this unit has' : 'tick the facilities this unit has')));
   return lines.join('\n');
 }
 
@@ -2510,16 +2488,15 @@ function runUnitCreate(chatId, id, messageId) {
   }
 
   const isLand = d.propertyType === 'Land';
-  // A unit in a building on the site shows that building's facilities, unless you ticked your own.
-  let createFeatures = unitFinalFeatures(d);
-  if (d.parentId && !(d.features || []).length) createFeatures = mergeUnitFeatures(createFeatures, fetchParentFeatures(d.parentId));
+  // A unit in a building on the site shows that building's facilities, video and completion date LIVE on its page, so only
+  // this unit's own features are stored here (what the post says, plus anything you ticked).
   const created = callIntake({
     action: 'create', title: title, folder: slug, price: f.price, listingType: f.listingType || 'resale',
     parentPropertyId: d.parentId, unitNumber: f.unitNumber, unitFloor: f.floor,
     bedrooms: isLand ? null : f.bedrooms, bathrooms: isLand ? null : f.bathrooms,
     sqm: f.sqm || 0, floorArea: f.sqm ? f.sqm + ' sqm' : null,
     propertyType: d.propertyType, location: d.location, city: d.city,
-    features: createFeatures, images: urls, videoUrl: f.video,
+    features: unitFinalFeatures(d), images: urls, videoUrl: f.video,
   });
   if (created.code !== 200 || !created.body.ok) {
     callIntake({ action: 'cleanup', slug: slug });
