@@ -1584,7 +1584,10 @@ function parseUnitText(text) {
   if (yt) out.video = 'https://www.youtube.com/watch?v=' + yt[1];
   t = t.replace(/(?:https?:\/\/)?(?:www\.|m\.)?(?:youtube\.com|youtu\.be)\/\S+/ig, ' ').replace(/https?:\/\/\S+/ig, ' ');
 
-  if (/#rent\b|for\s+rent|\/\s*month|per\s+month|monthly/i.test(t)) out.listingType = 'rent';
+  // Rent only when the post says so ("for rent", #rent) or when the PRICE itself is per month (checked below, right
+  // after the price is read). A monthly instalment, rental income or a current tenant's rent ("$368/ month") must
+  // never turn a sale into a rental.
+  if (/#rent\b|for\s+rent/i.test(t)) out.listingType = 'rent';
 
   let pm = t.match(/\$\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s*([kKmM])?/) || t.match(/\bprice\s*[:=]?\s*\$?\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s*([kKmM])?/i) || t.match(/\b([0-9][0-9,]{3,})\s*(?:usd|dollars?)\b/i);
   if (pm) {
@@ -1593,6 +1596,7 @@ function parseUnitText(text) {
     if (mult === 'k') p *= 1000;
     if (mult === 'm') p *= 1000000;
     if (p > 0) out.price = Math.round(p);
+    if (/^\s*(?:\/|per\s+|a\s+)\s*(?:month|mo)\b/i.test(t.slice(pm.index + pm[0].length))) out.listingType = 'rent';
   }
 
   if (/\bstudio\b/i.test(t)) out.bedrooms = 0;
@@ -1747,12 +1751,15 @@ function guessUnitType(text) {
 }
 
 function readPriceLine(line, out) {
+  const firstPrice = out.price === null; // only the main price can say "per month"
+  let tail = '';
   const arrow = line.match(/\$\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s*(?:→|->|=>|➡️?|➜|to)\s*\$\s*([0-9][0-9,]*(?:\.[0-9]+)?)/i);
   if (arrow) {
     const from = Math.round(parseFloat(arrow[1].replace(/,/g, '')));
     const to = Math.round(parseFloat(arrow[2].replace(/,/g, '')));
     out.priceChange = { from: from, to: to };
     out.price = to;
+    tail = line.slice(arrow.index + arrow[0].length);
   } else {
     const m = line.match(/\$\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s*([kKmM])?/);
     if (m && out.price === null) {
@@ -1762,8 +1769,11 @@ function readPriceLine(line, out) {
       if (mult === 'm') p *= 1000000;
       if (p > 0) out.price = Math.round(p);
     }
+    if (m) tail = line.slice(m.index + m[0].length);
   }
-  if (/\/\s*month|per\s+month|#ForRent|\brental\b|for\s+rent/i.test(line)) out.listingType = 'rent';
+  // Rent only when the line says so ("For Rent", "Rental Price:") or the main price is per month.
+  const priceIsMonthly = firstPrice && /^\s*(?:\/|per\s+|a\s+)\s*(?:month|mo)\b/i.test(tail);
+  if (/#ForRent|for\s+rent/i.test(line) || /\b(?:rental|rent)(?:\s*price)?\s*[:=]/i.test(line) || priceIsMonthly) out.listingType = 'rent';
   else if (/#ForSale|selling price|for\s+sale|\bresale\b/i.test(line) && out.listingType === null) out.listingType = 'resale';
 }
 
@@ -1856,6 +1866,11 @@ function findProjectInText(text, projects) {
   return hits.length === 1 ? hits[0] : null;
 }
 
+// Inside a payment plan, a line that starts like a normal field ends the block ("Price $49,999", "Floor: 6", "#ForSale ...").
+function endsPaymentBlock(line) {
+  return /^\s*(?:price|selling price|asking price|floor|level|gross|net|size|area|bed|bath|unit|location|address|project|building|facing|view|furnish|handover|completion|#for(?:sale|rent)|#newproject|📍|💰)/i.test(line);
+}
+
 function parseTelegramPost(text) {
   const out = {
     found: false, buildingName: null, bedrooms: null, bathrooms: null, grossSqm: null, netSqm: null, sqm: null,
@@ -1880,7 +1895,7 @@ function parseTelegramPost(text) {
 
     // "Payment Plans:" and everything after it (deposit, instalments, handover payment) stays off the page.
     if (/^[•\-*\s]*payment\s*(?:plans?|terms?|schedule)\b/i.test(line)) { section = 'payment'; out.paymentFound = true; return; }
-    if (section === 'payment') return;
+    if (section === 'payment') { if (endsPaymentBlock(line)) section = ''; else return; }
 
     if (/#ForSale|#ForRent|#NewProject/i.test(line) || /^💰/u.test(line) || (/\b(price|rent)\b/i.test(line) && /\$/.test(line))) {
       readPriceLine(line, out);
@@ -1936,8 +1951,20 @@ function parseTelegramPost(text) {
 }
 
 // Short caption and full post, merged. The full post wins where it has an answer.
+// The payment plan block (from its heading to the next normal field) is dropped before the short-caption reader looks at the post.
+function withoutPaymentPlan(text) {
+  const out = [];
+  let inPayment = false;
+  String(text || '').split('\n').forEach(function (line) {
+    if (/^[•\-*\s]*payment\s*(?:plans?|terms?|schedule)\b/i.test(line)) { inPayment = true; return; }
+    if (inPayment && endsPaymentBlock(line)) inPayment = false;
+    if (!inPayment) out.push(line);
+  });
+  return out.join('\n');
+}
+
 function parseUnitFacts(text) {
-  const base = parseUnitText(text);
+  const base = parseUnitText(withoutPaymentPlan(text));
   const full = parseTelegramPost(text);
   const facts = Object.assign({}, base);
   ['price', 'bedrooms', 'bathrooms', 'floor', 'unitNumber', 'listingType'].forEach(function (k) {
