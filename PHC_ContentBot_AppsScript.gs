@@ -2514,7 +2514,7 @@ function runUnitCreate(chatId, id, messageId) {
   let createFeatures = unitFinalFeatures(d);
   if (d.parentId && !(d.features || []).length) createFeatures = mergeUnitFeatures(createFeatures, fetchParentFeatures(d.parentId));
   const created = callIntake({
-    action: 'create', title: title, price: f.price, listingType: f.listingType || 'resale',
+    action: 'create', title: title, folder: slug, price: f.price, listingType: f.listingType || 'resale',
     parentPropertyId: d.parentId, unitNumber: f.unitNumber, unitFloor: f.floor,
     bedrooms: isLand ? null : f.bedrooms, bathrooms: isLand ? null : f.bathrooms,
     sqm: f.sqm || 0, floorArea: f.sqm ? f.sqm + ' sqm' : null,
