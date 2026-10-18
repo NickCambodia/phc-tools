@@ -1936,7 +1936,7 @@ function runUnitCreate(chatId, id, messageId) {
   unitSessionEnd();
   sendTelegramMessage(chatId,
     (isUnitDryRun() ? '[DRY RUN] ' : '') + 'Hidden draft created. Nobody else can see it yet.\n\n' +
-    title + '\n\nPreview link:\n' + created.body.previewUrl + '\n\n' +
+    title + (created.body.refCode ? '\nRef: ' + created.body.refCode : '') + '\n\nPreview link:\n' + created.body.previewUrl + '\n\n' +
     '1. Open the link while you are logged in to the website as admin.\n' +
     '2. Check the photos, facts and facilities.\n' +
     '3. Tap Publish Unit Live at the bottom of the page.');
