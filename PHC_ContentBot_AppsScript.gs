@@ -1665,6 +1665,7 @@ function describeIntakeFailure(res, what) {
 // ── Step 1: the #unit message arrives ───────────────────────────────
 
 function handleUnitIntake(chatId, text, imageFileIds) {
+  chatId = String(chatId); // Telegram only accepts the chat id as text from Apps Script (a Number goes out as "3.5E8" and fails with "chat not found")
   const facts = parseUnitText(text);
   const images = (imageFileIds || []).slice(0, UNIT_MAX_PHOTOS);
   const problems = [];
@@ -1699,6 +1700,7 @@ function isAwaitingUnitName(chatId, text, isForwarded) {
 }
 
 function handleUnitNameReply(chatId, text) {
+  chatId = String(chatId);
   const id = unitCache().get('unitawait_' + chatId);
   const d = id ? loadUnitDraft(id) : null;
   unitCache().remove('unitawait_' + chatId);
@@ -1714,8 +1716,8 @@ function handleUnitNameReply(chatId, text) {
 // ── Buttons ─────────────────────────────────────────────────────────
 
 function handleUnitCallback(cb, rest) {
-  const chatId = cb.message && cb.message.chat ? cb.message.chat.id : null;
-  if (String(chatId) !== REVIEWER_CHAT_ID) { answerCallback(cb.id, 'Not allowed.'); return; }
+  const chatId = cb.message && cb.message.chat ? String(cb.message.chat.id) : '';
+  if (chatId !== REVIEWER_CHAT_ID) { answerCallback(cb.id, 'Not allowed.'); return; }
   const parts = String(rest).split('_');
   const id = parts[0], verb = parts[1], arg = parts[2];
   const d = loadUnitDraft(id);
@@ -1813,6 +1815,7 @@ function unitSummaryKeyboard(d) {
 
 // `keepTitle` is true on facility taps: the title was already worked out, no need to ask the website again.
 function showUnitSummary(chatId, d, messageId, keepTitle) {
+  chatId = String(chatId);
   if (!keepTitle || !d.title) {
     const res = callIntake({
       action: 'prepare', parentPropertyId: d.parentId, buildingName: d.buildingName,
@@ -1835,6 +1838,7 @@ function showUnitSummary(chatId, d, messageId, keepTitle) {
 // ── Step 4: upload the photos in small requests, then create the draft ──
 
 function runUnitCreate(chatId, id, messageId) {
+  chatId = String(chatId);
   // Telegram can deliver the same tap twice if a run overlaps the next 1-minute poll,
   // so only the first one may start.
   const lock = LockService.getScriptLock();
@@ -1893,7 +1897,7 @@ function runUnitCreate(chatId, id, messageId) {
 // Edits an existing bot message's text and buttons (pass null to remove the buttons).
 function editUnitMessage(chatId, messageId, text, replyMarkup) {
   const token = PropertiesService.getScriptProperties().getProperty('BOT_TOKEN');
-  const payload = { chat_id: chatId, message_id: messageId, text: text };
+  const payload = { chat_id: String(chatId), message_id: String(messageId), text: text }; // strings on purpose, see handleUnitIntake
   if (replyMarkup) payload.reply_markup = JSON.stringify(replyMarkup);
   else payload.reply_markup = JSON.stringify({ inline_keyboard: [] });
   const resp = UrlFetchApp.fetch('https://api.telegram.org/bot' + token + '/editMessageText', {
