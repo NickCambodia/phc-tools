@@ -1100,6 +1100,15 @@ function handleStatusReply(chatId, text, replyToMessageId) {
     return;
   }
 
+  // A post made through the website route carries "Ref TS10-1021", so a "REDUCED $58,500" reply can also offer the
+  // website price change (a card with buttons, nothing changes until you tap).
+  let websiteChange = null;
+  if (!STATUS_LABELS[upper]) {
+    const ref = String(sheet.getRange(matchingRows[0], contentIdx + 1).getValue() || '').match(/\bRef\s+([A-Za-z][A-Za-z0-9]{0,5}-(\d{4,6}))\b/);
+    const amount = text.match(/\$\s*(\d[\d,]*(?:\.\d+)?)\s*([km])?(?![a-z0-9])/i);
+    if (ref && amount) websiteChange = { id: parseInt(ref[2], 10) - 1000, ref: ref[1], newPrice: parseMoneyAmount(amount[1], amount[2]) };
+  }
+
   let updatedCount = 0;
   matchingRows.forEach(rowNum => {
     const language = sheet.getRange(rowNum, langIdx + 1).getValue();
@@ -1122,6 +1131,7 @@ function handleStatusReply(chatId, text, replyToMessageId) {
   sendTelegramMessage(REVIEWER_CHAT_ID, updatedCount
     ? '✅ Updated ' + updatedCount + ' posted version(s) to: ' + banner.replace(/^[^\s]+\s/, '')
     : "🤔 Found that listing, but nothing was actually posted for it (all versions were rejected?).");
+  if (websiteChange && websiteChange.newPrice > 0 && websiteChange.id > 0) startPriceUpdate(chatId, websiteChange);
 }
 
 function editPostedMessage(chatId, messageId, newText, hasPhoto) {
