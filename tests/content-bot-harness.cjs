@@ -1829,5 +1829,38 @@ test('FREEFORM: a post that already has a 📍 area keeps it, and an unknown pro
   assert.ok(/📍 BKK1, Phnom Penh/.test(env.sheetData[1][3]));
 });
 
+const ts8b = ['Urgent Sale – Time Square 8 | 2-Bedroom Resale Unit', 'Project: Time Square 8', 'Unit Type: 2 Bedrooms', 'Floor: 32', 'Size: 73 sqm', 'Facing: North', 'Selling Price: $99,000', 'Monthly Payment: $678 from November 2026 to March 2029', 'Handover Payment: $50,888', '📞 012 345 678'].join('\n');
+const assembleEn = (env, text) => { run(env, `processChannelListing(${CHAT}, ${JSON.stringify(text)}, [], false, null, null)`); return env.sheetData[1][3]; };
+const plainFont = (t) => t.replace(/[\u{1D400}-\u{1D7FF}]/gu, 'x');
+
+test('FREEFORM: "Project: Time Square 8" is dropped when the title already names it, but kept when it does not', () => {
+  const dup = freeform(makeEnv(), ts8b).bullets.map((b) => b.text);
+  assert.ok(!dup.some((t) => /^Project:/i.test(t)), dup.join(' | '));
+  const kept = freeform(makeEnv(), 'Cozy studio for sale\nProject: Odom Living\nFloor: 3\nSize: 30 sqm\nPrice: $60,000').bullets.map((b) => b.text);
+  assert.ok(kept.includes('Project: Odom Living'), kept.join(' | '));
+});
+
+test('FREEFORM: "Unit Type: 2 Bedrooms" becomes the standard bedroom line, first in UNIT DETAILS', () => {
+  const en = assembleEn(makeEnv(), ts8b);
+  const body = en.split('\n');
+  const i = body.findIndex((l) => /𝗨𝗡𝗜𝗧/.test(l));
+  assert.strictEqual(body[i + 1], '🛏 2 Beds', en);
+  assert.ok(!/Unit Type/.test(en), en);
+});
+
+test('FREEFORM: separate "Bedrooms: 2" and "Bathrooms: 2" lines join into one 🛏 | 🛁 line', () => {
+  const env = makeEnv();
+  const en = assembleEn(env, 'Resale unit\nBedrooms: 2\nBathrooms: 2\nFloor: 9\nSize: 70 sqm\nSelling price: $90,000');
+  assert.ok(en.split('\n').includes('🛏 2 Beds | 🛁 2 Baths'), en);
+  assert.ok(!/Bedrooms: 2|Bathrooms: 2/.test(en), en);
+});
+
+test('FREEFORM: label forms still do not swallow other bedroom wording ("1 Bedroom Duplex" stays a bullet)', () => {
+  const env = makeEnv();
+  assert.strictEqual(run(env, `parseBedBathText('1 Bedroom Duplex')`), null);
+  assert.strictEqual(run(env, `parseBedBathText('Unit Type: Penthouse')`), null);
+  assert.deepStrictEqual(JSON.parse(run(env, `JSON.stringify(parseBedBathText('Unit Type: Studio'))`)), { beds: 0, baths: null });
+});
+
 console.log(failures ? `\n${failures} FAILED` : '\nALL PASSED');
 process.exit(failures ? 1 : 0);

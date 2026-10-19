@@ -702,6 +702,9 @@ function parseFreeformListing(text) {
     if (contactLineRegex.test(rawLine) || contactLineRegex.test(line)) return; // never carry over another agent's contact info (checked before the leading 📞 is stripped)
     if (sectionHeadingRegex.test(line.replace(/[:：\s]+$/, ''))) return;
     if (/^\s*📍/.test(rawLine) && !location) { location = line; return; } // the post's own area line
+    // "Project: Time Square 8" says nothing the title does not: drop it when the title already names the project
+    const projectLine = line.match(/^(?:project|building|development)\s*(?:name)?\s*[:：-]\s*(.+)$/i);
+    if (projectLine && titleFound && title.toLowerCase().indexOf(projectLine[1].trim().toLowerCase()) !== -1) return;
 
     if (/\b(price|rental|rent)\b/i.test(line) && /[\d,]+/.test(line)) {
       const amt = line.match(/[\d,]+/);
@@ -744,6 +747,10 @@ function parseBedBathText(text) {
   if (!segs.length || segs.length > 2) return null;
   let beds = null, baths = null, m;
   for (let i = 0; i < segs.length; i++) {
+    // "Unit Type: 2 Bedrooms", "Bedroom: 2", "Bathrooms: 1": a label in front of the number is fine
+    segs[i] = segs[i].replace(/^(?:unit\s*type|type)\s*[:：]\s*/i, '');
+    if ((m = segs[i].match(/^(?:bed(?:room)?s?|br)\s*[:：]\s*([0-9]+)$/i))) { beds = parseInt(m[1], 10); continue; }
+    if ((m = segs[i].match(/^bath(?:room)?s?\s*[:：]\s*([0-9]+(?:[.,][0-9]+)?)$/i))) { baths = parseFloat(m[1].replace(',', '.')); continue; }
     if (/^studio$/i.test(segs[i])) beds = 0;
     else if ((m = segs[i].match(/^([0-9]+)\s*[- ]?(?:bed(?:room)?s?|br)$/i))) beds = parseInt(m[1], 10);
     else if ((m = segs[i].match(/^([0-9]+(?:[.,][0-9]+)?)\s*[- ]?bath(?:room)?s?$/i))) baths = parseFloat(m[1].replace(',', '.'));
@@ -909,8 +916,12 @@ function assembleListing(fields, lang) {
   let bedbath = null;
   const restBullets = [];
   bulletsEn.forEach(b => {
-    const bb = b.icon === '✅' && !bedbath ? parseBedBathText(b.text) : null;
-    if (bb) bedbath = bb; else restBullets.push(b);
+    const bb = b.icon === '✅' ? parseBedBathText(b.text) : null;
+    // a separate "Bedrooms: 2" line and "Bathrooms: 1" line join into one; a second line for the same thing stays a normal bullet
+    const mergeable = bb && bedbath && ((bedbath.beds === null && bb.beds !== null && bb.baths === null) || (bedbath.baths === null && bb.baths !== null && bb.beds === null));
+    if (bb && !bedbath) bedbath = bb;
+    else if (mergeable) bedbath = { beds: bedbath.beds !== null ? bedbath.beds : bb.beds, baths: bedbath.baths !== null ? bedbath.baths : bb.baths };
+    else restBullets.push(b);
   });
   // A single unit for sale or rent with its bedrooms and bathrooms known uses the compact layout (see assembleCompactListing).
   if (COMPACT_LISTING_LAYOUT && (fields.forSale || fields.forRent) && bedbath) return assembleCompactListing(fields, lang, restBullets, bedbath, titleEn, locationEn, toLang);
