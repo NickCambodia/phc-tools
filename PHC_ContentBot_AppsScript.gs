@@ -182,6 +182,7 @@ function pollTelegramOnce(timeoutSeconds) {
         if (photoId) mediaGroups[gid].photoIds.push(photoId);
         const imageId = getImageFileId(m); // photos AND image files: used only by the #unit intake
         if (imageId) mediaGroups[gid].imageIds.push(imageId);
+        warnAboutHeic(m);
         if (m.caption) { mediaGroups[gid].captionText = m.caption; mediaGroups[gid].captionEntities = getMessageEntities(m); }
         if (isMessageForwarded(m)) mediaGroups[gid].isForwarded = true;
         const srcU = getForwardSourceUsername(m);
@@ -197,6 +198,7 @@ function pollTelegramOnce(timeoutSeconds) {
     try {
       const photoId = getLargestPhotoId(m);
       const imageId = getImageFileId(m);
+      warnAboutHeic(m);
       handleIncomingMessage(m.chat.id, m.caption || m.text || '', photoId ? [photoId] : [], isMessageForwarded(m), getForwardSourceUsername(m), getMessageEntities(m), imageId ? [imageId] : []);
     } catch (err) { Logger.log('handleIncomingMessage error: ' + err); }
   });
@@ -1634,9 +1636,31 @@ function getImageFileId(m) {
   if (d && d.file_id) {
     const mime = String(d.mime_type || '').toLowerCase();
     const name = String(d.file_name || '').toLowerCase();
+    if (isHeicDocument(d)) return null; // the website cannot use iPhone HEIC files, see warnAboutHeic
     if (mime.indexOf('image/') === 0 || /\.(jpe?g|png|webp)$/.test(name)) return d.file_id;
   }
   return null;
+}
+
+// iPhone's own picture format. Telegram turns it into a JPEG when you send it as a Photo, but not when you send it as a File.
+function isHeicDocument(d) {
+  if (!d) return false;
+  const mime = String(d.mime_type || '').toLowerCase();
+  const name = String(d.file_name || '').toLowerCase();
+  return /image\/hei[cf]/.test(mime) || /\.hei[cf]$/.test(name);
+}
+
+// Tells you once a minute that HEIC files were skipped (an album of ten would otherwise send ten messages).
+function warnAboutHeic(m) {
+  if (!m || !isHeicDocument(m.document) || !m.chat) return;
+  const chatId = String(m.chat.id);
+  if (chatId !== REVIEWER_CHAT_ID) return;
+  const key = 'heicwarn_' + chatId;
+  if (unitCache().get(key)) return;
+  unitCache().put(key, '1', 60);
+  sendTelegramMessage(chatId,
+    'Some of your pictures are HEIC files (the iPhone format). The website cannot use them, so I skipped them.\n' +
+    'Send those again as Photos, not as Files. Or on the iPhone open Settings, Camera, Formats and choose Most Compatible.');
 }
 
 // Pulls the facts out of the caption. Returns nulls for anything it cannot find.
@@ -1763,6 +1787,7 @@ function dryRunIntake(payload) {
   if (payload.action === 'lookup') {
     return { code: 200, body: { ok: true, id: payload.id, title: 'Dry Run Tower · 1 Bedroom · Floor 6', price: 62000, status: 'active', listingType: 'resale', bedrooms: 1, bathrooms: 1, sqm: 40, floor: '6', location: 'BKK1', city: 'Phnom Penh', refCode: 'DRT-' + (payload.id + 1000), url: 'DRY RUN (no page)' } };
   }
+  if (payload.action === 'twins') return { code: 200, body: { ok: true, twins: [] } };
   if (payload.action === 'price') return { code: 200, body: { ok: true, id: payload.id, oldPrice: payload.expectedOldPrice, newPrice: payload.newPrice } };
   if (payload.action === 'status') return { code: 200, body: { ok: true, id: payload.id, status: payload.newStatus } };
   return { code: 200, body: { ok: true, removed: 0 } };
@@ -2425,12 +2450,42 @@ function handleUnitCallback(cb, rest) {
     showUnitSummary(chatId, d, messageId, true);
     return;
   }
-  if (verb === 'go') {
+  if (verb === 'go' && !d.dupOk) {
+    const twins = findUnitTwins(d);
+    if (twins.length) {
+      answerCallback(cb.id, 'Possible duplicate.');
+      editUnitMessage(chatId, messageId, duplicateWarningText(twins), { inline_keyboard: [
+        [{ text: 'Create another anyway', callback_data: 'unit_' + d.id + '_dup' }],
+        [{ text: 'Cancel', callback_data: 'unit_' + d.id + '_x' }],
+      ] });
+      return;
+    }
+  }
+  if (verb === 'go' || verb === 'dup') {
+    if (verb === 'dup') { d.dupOk = true; saveUnitDraft(d); }
     answerCallback(cb.id, 'Working on it...');
     runUnitCreate(chatId, id, messageId);
     return;
   }
   answerCallback(cb.id, '');
+}
+
+// Units of the same building that look like this one (same floor and bedrooms, or the same private unit number).
+// If the website cannot be asked, the draft goes ahead: a failed check must never block your work.
+function findUnitTwins(d) {
+  if (!d.parentId) return [];
+  const f = d.facts;
+  if (!f.floor && !f.unitNumber) return [];
+  const r = callIntake({ action: 'twins', parentPropertyId: d.parentId, listingType: f.listingType || 'resale', floor: f.floor, bedrooms: f.bedrooms, unitNumber: f.unitNumber });
+  if (r.code !== 200 || !r.body || !r.body.ok || !r.body.twins) return [];
+  return r.body.twins;
+}
+
+function duplicateWarningText(twins) {
+  const label = function (st) { return st === 'active' ? 'live' : (st === 'draft' ? 'hidden draft' : st); };
+  return 'Possible duplicate. The website already has ' + (twins.length === 1 ? 'a unit' : twins.length + ' units') + ' like this one in the same building:\n\n' +
+    twins.map(function (t) { return t.refCode + ': ' + t.title + ', ' + formatUsd(t.price) + ' (' + label(t.status) + ')'; }).join('\n') +
+    '\n\nIf it is the same unit, cancel and change the price of the existing one instead (send "' + twins[0].refCode + ' price reduced to $..."). Otherwise create another.';
 }
 
 // Returns true if these photos belong to an album whose text was already handled.
