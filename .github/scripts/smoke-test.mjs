@@ -51,6 +51,17 @@ async function mockExternalCalls(page) {
   await page.route(/fonts\.(googleapis|gstatic)\.com/, (route) => {
     route.fulfill({ status: 200, contentType: "text/css", body: "" });
   });
+  // PHC_Sales_Desk.html fetches live FX rates on load (open.er-api.com,
+  // falling back to api.frankfurter.dev). route.abort() still surfaces as a
+  // page console.error (Chromium logs the resource-load failure itself,
+  // separate from the page's own try/catch), so fulfill with an empty-but-
+  // valid response instead — the page just keeps its existing/manual rates.
+  await page.route(/open\.er-api\.com\//, (route) => {
+    route.fulfill({ status: 200, contentType: "application/json", body: '{"rates":{}}' });
+  });
+  await page.route(/api\.frankfurter\.dev\//, (route) => {
+    route.fulfill({ status: 200, contentType: "application/json", body: '{"rates":{}}' });
+  });
 }
 
 async function main() {
