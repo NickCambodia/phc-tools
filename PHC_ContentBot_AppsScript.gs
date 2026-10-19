@@ -333,6 +333,7 @@ function processChannelListing(chatId, text, photoFileIds, isForwarded, sourceUs
   let fields, assembleFn;
   let ownAsUnit = false; // a forward from your channel that is a single unit is rebuilt in the compact layout like any other listing
   if (isFromOwnChannel) {
+    text = boldEntitiesToUnicode(text, originalEntities); // keep the post's bold (see the function)
     const tried = parseListingText(text);
     ownAsUnit = COMPACT_LISTING_LAYOUT && !!((tried.forSale || tried.forRent) && tried.bullets.some(function (b) { return b.icon === '✅' && parseBedBathText(b.text); }));
     fields = ownAsUnit ? tried : null;
@@ -1075,6 +1076,23 @@ function toBoldSansSerif(str) {
     if (code >= 48 && code <= 57) return String.fromCodePoint(0x1D7EC + (code - 48));   // 0-9
     return ch;
   }).join('');
+}
+
+// A post forwarded from your own channel is rebuilt as new text, so Telegram's own formatting marks (bold, which come as a
+// separate list of positions) no longer line up and are dropped. Bold is written the way the listing titles already are,
+// with the bold letters from the bold sans serif block, so it survives the rebuild and the translation step
+// (translateWholeText puts the same bold back on a translated line). Only Latin letters and digits have a bold form, so bold
+// Japanese, Russian or Khmer text stays plain. Bold that covers a link or @name is left alone so the link keeps working.
+function boldEntitiesToUnicode(text, entities) {
+  if (!text || !entities || !entities.length) return text;
+  const bolds = entities.filter(function (e) { return e && e.type === 'bold' && e.length > 0; }).sort(function (a, b) { return b.offset - a.offset; });
+  let out = String(text);
+  bolds.forEach(function (e) {
+    const seg = out.substr(e.offset, e.length);
+    if (/:\/\/|t\.me\/|@\w/.test(seg)) return;
+    out = out.substr(0, e.offset) + toBoldSansSerif(seg) + out.substr(e.offset + e.length);
+  });
+  return out;
 }
 
 function fromBoldSansSerif(str) {

@@ -1919,5 +1919,41 @@ test('PAYMENT: the 💳 lines survive when the bot reads its own post back and r
   assert.strictEqual(twice.split('\n')[0], '#ForSale $99,000 (Urgent)');
 });
 
+// ====================== bold in a post forwarded from your own channel ======================
+const article = '🇰🇭 GORDON RAMSAY BURGER COMING TO PHNOM PENH\n\n🍔 World-renowned chef Gordon Ramsay is bringing Gordon Ramsay Burger to Cambodia.\n\n✨ What to expect\n✅ International dining experience\n\n📰 Source: https://www.tnaot.app/news/2v6mgzg7\n\n#Cambodia #PhnomPenh';
+const boldAt = (t, s) => ({ type: 'bold', offset: t.indexOf(s), length: s.length });
+
+test('OWN CHANNEL BOLD: the bold title and bold sub heading of a forwarded article stay bold in EN and are re-bolded in the translations', () => {
+  const env = makeEnv();
+  const ents = [boldAt(article, 'GORDON RAMSAY BURGER COMING TO PHNOM PENH'), boldAt(article, 'What to expect')];
+  run(env, `processChannelListing(${CHAT}, ${JSON.stringify(article)}, [], true, 'NickREAKH', ${JSON.stringify(ents)})`);
+  const rows = env.sheetData.slice(1);
+  assert.deepStrictEqual(rows.map((r) => r[2]), ['EN', 'JP', 'RU', 'DE']);
+  const en = rows[0][3].split('\n');
+  assert.strictEqual(en[0], '🇰🇭 𝗚𝗢𝗥𝗗𝗢𝗡 𝗥𝗔𝗠𝗦𝗔𝗬 𝗕𝗨𝗥𝗚𝗘𝗥 𝗖𝗢𝗠𝗜𝗡𝗚 𝗧𝗢 𝗣𝗛𝗡𝗢𝗠 𝗣𝗘𝗡𝗛');
+  assert.ok(en.includes('✨ 𝗪𝗵𝗮𝘁 𝘁𝗼 𝗲𝘅𝗽𝗲𝗰𝘁'), en.join(' | '));
+  assert.ok(/^🍔 World-renowned/.test(en[2]), 'text that was not bold stays plain');
+  assert.ok(/https:\/\/www\.tnaot\.app\/news\/2v6mgzg7/.test(rows[0][3]), 'the link is untouched');
+  const de = rows[3][3].split('\n');
+  assert.ok(/[\u{1D5D4}-\u{1D607}]/u.test(de[0]), 'the German title is bold again: ' + de[0]);
+  assert.ok(!/[\u{1D5D4}-\u{1D607}]/u.test(de[2]), 'a plain line stays plain in German');
+});
+
+test('OWN CHANNEL BOLD: bold that covers a link or @name is left alone, and a post with no formatting is unchanged', () => {
+  const env = makeEnv();
+  const t = 'Read this: https://example.com/a and @someone';
+  assert.strictEqual(run(env, `boldEntitiesToUnicode(${JSON.stringify(t)}, ${JSON.stringify([{ type: 'bold', offset: 11, length: 21 }, { type: 'bold', offset: 37, length: 8 }])})`), t);
+  assert.strictEqual(run(env, `boldEntitiesToUnicode(${JSON.stringify(article)}, null)`), article);
+  assert.strictEqual(run(env, `boldEntitiesToUnicode(${JSON.stringify(article)}, [])`), article);
+  assert.strictEqual(run(env, `boldEntitiesToUnicode(${JSON.stringify(article)}, ${JSON.stringify([{ type: 'italic', offset: 0, length: 5 }])})`), article);
+});
+
+test('OWN CHANNEL BOLD: two bold parts on one line are both converted without shifting each other', () => {
+  const env = makeEnv();
+  const t = 'Hello big world today';
+  const out = run(env, `boldEntitiesToUnicode(${JSON.stringify(t)}, ${JSON.stringify([boldAt(t, 'Hello'), boldAt(t, 'world')])})`);
+  assert.strictEqual(out, '𝗛𝗲𝗹𝗹𝗼 big 𝘄𝗼𝗿𝗹𝗱 today');
+});
+
 console.log(failures ? `\n${failures} FAILED` : '\nALL PASSED');
 process.exit(failures ? 1 : 0);
