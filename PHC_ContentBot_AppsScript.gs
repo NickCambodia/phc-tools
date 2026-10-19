@@ -509,6 +509,11 @@ function parseListingText(text) {
     if (/^[A-Z\s]{3,}$/.test(plain) && !bulletIcons.some(ic => line.startsWith(ic))) continue; // skip section labels (UNIT DETAILS, FEATURES, etc.)
     if (line.startsWith('📞')) break; // contact block — stop parsing, we use our own contact info
 
+    if (/^[\u{1F6CF}\u{1F6C1}]/u.test(line)) { // "🛏 1 Bed | 🛁 1 Bath": read like a ✅ detail, the bed and bath line is rebuilt later
+      seenBullet = true;
+      bullets.push({ icon: '✅', text: line.replace(/^[\u{1F6CF}\u{1F6C1}\uFE0F\s]+/u, '').trim() });
+      continue;
+    }
     const icon = bulletIcons.find(ic => line.startsWith(ic));
     if (icon) {
       seenBullet = true;
@@ -710,6 +715,61 @@ function classifyBullet(text) {
   return featureHints.test(text) ? 'features' : 'details';
 }
 
+// ── Bedrooms and bathrooms: one line, always first in UNIT DETAILS ─────────────
+// "🛏 1 Bed | 🛁 1 Bath". The words come from this table in every language (not from the translator), so Bed and Bath can
+// never be mistranslated and the line needs no translator call.
+const BEDBATH_ICONS = /[\u{1F6CF}\u{1F6C1}\uFE0F]/gu;
+
+// "1 Bedroom | 1 Bathroom", "🛏 1 Bed | 🛁 1 Bath", "Studio | 1 Bath", "2 Beds". Anything with other words ("1 Bedroom Duplex") is not a match.
+function parseBedBathText(text) {
+  const t = String(text || '').replace(BEDBATH_ICONS, ' ').replace(/\s+/g, ' ').trim();
+  if (!t) return null;
+  const segs = t.split('|').map(function (x) { return x.trim(); }).filter(Boolean);
+  if (!segs.length || segs.length > 2) return null;
+  let beds = null, baths = null, m;
+  for (let i = 0; i < segs.length; i++) {
+    if (/^studio$/i.test(segs[i])) beds = 0;
+    else if ((m = segs[i].match(/^([0-9]+)\s*[- ]?(?:bed(?:room)?s?|br)$/i))) beds = parseInt(m[1], 10);
+    else if ((m = segs[i].match(/^([0-9]+(?:[.,][0-9]+)?)\s*[- ]?bath(?:room)?s?$/i))) baths = parseFloat(m[1].replace(',', '.'));
+    else return null;
+  }
+  if (beds === null && baths === null) return null;
+  return { beds: beds, baths: baths };
+}
+
+function ruPlural(n, one, few, many, fraction) {
+  if (n !== Math.floor(n)) return fraction || many; // 1.5 ванной
+  const a = n % 10, b = n % 100;
+  if (a === 1 && b !== 11) return one;
+  if (a >= 2 && a <= 4 && (b < 12 || b > 14)) return few;
+  return many;
+}
+
+function formatBedBath(bb, lang) {
+  const parts = [];
+  const num = function (x) { return String(x); };
+  if (bb.beds !== null && bb.beds !== undefined) {
+    const n = bb.beds;
+    let word;
+    if (n === 0) word = { EN: 'Studio', JP: 'スタジオ', RU: 'Студия', DE: 'Studio' }[lang];
+    else if (lang === 'JP') word = num(n) + 'ベッドルーム';
+    else if (lang === 'RU') word = num(n) + ' ' + ruPlural(n, 'спальня', 'спальни', 'спален', 'спальни');
+    else if (lang === 'DE') word = num(n) + ' Schlafzimmer';
+    else word = num(n) + ' ' + (n === 1 ? 'Bed' : 'Beds');
+    parts.push('🛏 ' + word);
+  }
+  if (bb.baths !== null && bb.baths !== undefined) {
+    const n = bb.baths;
+    let word;
+    if (lang === 'JP') word = num(n) + 'バスルーム';
+    else if (lang === 'RU') word = num(n) + ' ' + ruPlural(n, 'ванная', 'ванные', 'ванных', 'ванной');
+    else if (lang === 'DE') word = num(n) + ' ' + (n === 1 ? 'Bad' : 'Bäder');
+    else word = num(n) + ' ' + (n === 1 ? 'Bath' : 'Baths');
+    parts.push('🛁 ' + word);
+  }
+  return parts.join(' | ');
+}
+
 function bucketListing(bullets) {
   const details = [], features = [], utilities = [];
   bullets.forEach(b => {
@@ -808,6 +868,8 @@ function translateWholeText(text, lang) {
     // "printed matter" — nonsense). Convert to plain ASCII before translating,
     // then reapply bold styling to the result if the original line had it.
     const plainLine = fromBoldSansSerif(line);
+    const bb = parseBedBathText(plainLine.replace(/^✅\s*/, ''));
+    if (bb && /^(?:✅|\u{1F6CF})/u.test(plainLine.trim())) return formatBedBath(bb, lang); // not sent to the translator
     const wasBold = plainLine !== line;
     const translated = translateField(plainLine, 'en', lang);
     return wasBold ? toBoldSansSerif(translated) : translated;
@@ -827,7 +889,14 @@ function assembleListing(fields, lang) {
   const locationEn = fields.location ? toEn(fields.location) : '';
   const bulletsEn = fields.bullets.map(b => ({ icon: b.icon, text: toEn(b.text) }));
 
-  const sections = bucketListing(bulletsEn); // classify on EN text — consistent structure across all languages
+  // The bedroom and bathroom line is taken out here and put back first in UNIT DETAILS, built from the table (see formatBedBath).
+  let bedbath = null;
+  const restBullets = [];
+  bulletsEn.forEach(b => {
+    const bb = b.icon === '✅' && !bedbath ? parseBedBathText(b.text) : null;
+    if (bb) bedbath = bb; else restBullets.push(b);
+  });
+  const sections = bucketListing(restBullets); // classify on EN text — consistent structure across all languages
 
   // Project/place names are proper nouns — never machine-translate them, or
   // "TIME SQUARE 10" risks coming back garbled in JP/DE. Normalizing a zh
@@ -836,6 +905,7 @@ function assembleListing(fields, lang) {
   const title = titleEn;
   const location = locationEn;
   const displaySections = sections.map(([header, items]) => [header, items.map(b => ({ icon: b.icon, text: toLang(b.text) }))]);
+  if (bedbath) displaySections[0][1].unshift({ icon: '', text: formatBedBath(bedbath, lang), plain: true });
 
   let priceLine = '';
   if (fields.forSale) priceLine += '#ForSale ' + fields.forSale + '\n';
@@ -846,7 +916,7 @@ function assembleListing(fields, lang) {
   body += '\n――――――――――\n\n';
   displaySections.forEach(([header, items]) => {
     if (!items.length) return;
-    body += toBoldSansSerif(header) + '\n' + items.map(b => b.icon + ' ' + b.text).join('\n') + '\n\n';
+    body += toBoldSansSerif(header) + '\n' + items.map(b => b.plain ? b.text : b.icon + ' ' + b.text).join('\n') + '\n\n';
   });
   body += '――――――――――\n' + CONTACT_STANDARD;
   return body;
@@ -1937,11 +2007,12 @@ function addUnitFeature(out, text) {
 // Returns true when the piece was a structured fact; false means it is a plain feature.
 function applyDetailSegment(seg, out) {
   let m;
+  seg = String(seg).replace(/^[\u{1F6CF}\u{1F6C1}\uFE0F\s]+/u, '');
   if ((m = seg.match(/^unit\s*(?:no\.?|number|#)?\s*[:#-]?\s*([A-Za-z0-9][A-Za-z0-9\-]{0,11})$/i)) && /\d/.test(m[1])) { out.unitNumber = m[1].toUpperCase(); return true; }
   if ((m = seg.match(/^(?:([0-9]{1,3})(?:st|nd|rd|th)?\s*floor|floor\s*[:#]?\s*([0-9]{1,3}|G))$/i))) { out.floor = String(m[1] || m[2]).toUpperCase(); return true; }
   if (/^studio$/i.test(seg)) { out.bedrooms = 0; return true; }
   if ((m = seg.match(/^([0-9]+)\s*[- ]?(?:bed(?:room)?s?|br)\b/i))) { out.bedrooms = parseInt(m[1], 10); return true; }
-  if ((m = seg.match(/^([0-9]+)\s*[- ]?bath(?:room)?s?\b/i))) { out.bathrooms = parseInt(m[1], 10); return true; }
+  if ((m = seg.match(/^([0-9]+(?:[.,][0-9]+)?)\s*[- ]?bath(?:room)?s?\b/i))) { out.bathrooms = parseFloat(m[1].replace(',', '.')); return true; }
   if ((m = seg.match(/^([0-9]+(?:[.,][0-9]+)?)\s*(?:㎡|m²|m2|sqm|sq\.?\s?m)\s*(gross|net)?$/i))) {
     const v = Math.round(parseFloat(m[1].replace(',', '.')));
     const kind = (m[2] || '').toLowerCase();
@@ -2028,7 +2099,7 @@ function parseTelegramPost(text) {
   const plain = fromBoldSansSerif(String(text || ''));
   const lines = plain.split('\n').map(function (l) { return l.trim(); });
   const contactRe = /t\.me\/|wa\.me\/|whatsapp|telegram|@\w+|https?:\/\/|www\.|^(?:📞|📱|☎|✆|📧|✉|🏠|🌐|🔗|🏷)/iu;
-  const bulletRe = /^(?:✅|✓|✔️?|☑️?|•|●|▪️?|■|★|➡️?|⁃|-)\s*/u;
+  const bulletRe = /^(?:✅|✓|✔️?|☑️?|•|●|▪️?|■|★|➡️?|⁃|-|\u{1F6CF}\uFE0F?|\u{1F6C1})\s*/u;
   let section = '';
   let titleText = '';
   let titleDone = false;
@@ -2733,8 +2804,8 @@ function unitFactsToChannelText(d) {
   const loc = [d.location, d.city].filter(Boolean).join(', ');
   if (loc) lines.push('📍 ' + loc);
   lines.push('', '――――――――――', '', 'UNIT DETAILS');
+  if (f.bedrooms !== null || f.bathrooms !== null) lines.push(formatBedBath({ beds: f.bedrooms, baths: f.bathrooms }, 'EN'));
   if (f.floor) lines.push('✅ ' + f.floor + (/^\d+$/.test(f.floor) ? 'th' : '') + ' Floor');
-  if (f.bedrooms !== null || f.bathrooms !== null) lines.push('✅ ' + [f.bedrooms === null ? null : (f.bedrooms === 0 ? 'Studio' : f.bedrooms + ' Bedroom'), f.bathrooms === null ? null : f.bathrooms + ' Bathroom'].filter(Boolean).join(' | '));
   if (f.sqm) lines.push('✅ ' + f.sqm + ' sqm');
   unitFinalFeatures(d).forEach(function (x) { lines.push('✅ ' + x); });
   return lines.join('\n');

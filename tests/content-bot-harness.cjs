@@ -1535,5 +1535,81 @@ test('NAMES: a whole post forwarded from your own channel keeps BKK1 in JP', () 
   assert.ok(!/バンコク/.test(out) && /BKK1, Phnom Penh/.test(out), out);
 });
 
+// ---------- bedrooms and bathrooms on one line, first in UNIT DETAILS
+const FB = (env, bb, lang) => run(env, `formatBedBath(${JSON.stringify(bb)}, '${lang}')`);
+test('BEDBATH: the line in every language, with plurals', () => {
+  const env = makeEnv();
+  assert.strictEqual(FB(env, { beds: 1, baths: 1 }, 'EN'), '🛏 1 Bed | 🛁 1 Bath');
+  assert.strictEqual(FB(env, { beds: 2, baths: 2 }, 'EN'), '🛏 2 Beds | 🛁 2 Baths');
+  assert.strictEqual(FB(env, { beds: 0, baths: 1 }, 'EN'), '🛏 Studio | 🛁 1 Bath');
+  assert.strictEqual(FB(env, { beds: 2, baths: 1.5 }, 'EN'), '🛏 2 Beds | 🛁 1.5 Baths');
+  assert.strictEqual(FB(env, { beds: 1, baths: null }, 'EN'), '🛏 1 Bed');
+  assert.strictEqual(FB(env, { beds: 2, baths: 1 }, 'JP'), '🛏 2ベッドルーム | 🛁 1バスルーム');
+  assert.strictEqual(FB(env, { beds: 0, baths: 1 }, 'JP'), '🛏 スタジオ | 🛁 1バスルーム');
+  assert.strictEqual(FB(env, { beds: 1, baths: 1 }, 'RU'), '🛏 1 спальня | 🛁 1 ванная');
+  assert.strictEqual(FB(env, { beds: 3, baths: 2 }, 'RU'), '🛏 3 спальни | 🛁 2 ванные');
+  assert.strictEqual(FB(env, { beds: 5, baths: 11 }, 'RU'), '🛏 5 спален | 🛁 11 ванных');
+  assert.strictEqual(FB(env, { beds: 2, baths: 1.5 }, 'RU'), '🛏 2 спальни | 🛁 1.5 ванной');
+  assert.strictEqual(FB(env, { beds: 2, baths: 1 }, 'DE'), '🛏 2 Schlafzimmer | 🛁 1 Bad');
+  assert.strictEqual(FB(env, { beds: 2, baths: 2 }, 'DE'), '🛏 2 Schlafzimmer | 🛁 2 Bäder');
+});
+test('BEDBATH: the old and the new way of writing it are both read; other lines are not mistaken for it', () => {
+  const env = makeEnv();
+  const P = (t) => JSON.parse(run(env, `JSON.stringify(parseBedBathText(${JSON.stringify(t)}))`));
+  assert.deepStrictEqual(P('1 Bedroom | 1 Bathroom'), { beds: 1, baths: 1 });
+  assert.deepStrictEqual(P('🛏 1 Bed | 🛁 1 Bath'), { beds: 1, baths: 1 });
+  assert.deepStrictEqual(P('🛏️ 2 Beds | 🛁 1.5 Baths'), { beds: 2, baths: 1.5 });
+  assert.deepStrictEqual(P('Studio | 1 Bath'), { beds: 0, baths: 1 });
+  assert.deepStrictEqual(P('2BR'), { beds: 2, baths: null });
+  assert.strictEqual(P('1 Bedroom Duplex'), null);
+  assert.strictEqual(P('9th Floor'), null);
+  assert.strictEqual(P('47 sqm Gross | 38 sqm Net'), null);
+  assert.strictEqual(P(''), null);
+});
+const detailsOf = (env, text, lang) => {
+  const f = JSON.parse(run(env, `JSON.stringify(parseListingText(${JSON.stringify(text)}))`));
+  const out = run(env, `assembleListing(${JSON.stringify(f)}, '${lang}')`);
+  const plain = run(env, `fromBoldSansSerif(${JSON.stringify(out)})`);
+  return plain.split('UNIT DETAILS')[1].split('\n').filter(Boolean).slice(0, 4);
+};
+const sourcePost = '#ForSale $35,000\n\nRESIDENCE L | 1BR UNIT\n📍 BKK1, Phnom Penh\n\n――――――――――\n\nUNIT DETAILS\n✅ 9th Floor\n✅ 1 Bedroom | 1 Bathroom\n✅ 47 sqm Gross | 38 sqm Net\n\n📞 011 666 952';
+test('BEDBATH: first line of UNIT DETAILS in the English post, then floor and size', () => {
+  const env = makeEnv();
+  assert.deepStrictEqual(detailsOf(env, sourcePost, 'EN').slice(0, 3), ['🛏 1 Bed | 🛁 1 Bath', '✅ 9th Floor', '✅ 47 sqm Gross | 38 sqm Net']);
+});
+test('BEDBATH: the new emoji line written by you is read too, and not sent to the translator in JP', () => {
+  const env = makeEnv();
+  run(env, `__n = []; LanguageApp.translate = function (t, f, to) { __n.push(t); return '[' + to + '] ' + t; }`);
+  const post = sourcePost.replace('✅ 1 Bedroom | 1 Bathroom', '🛏 1 Bed | 🛁 1 Bath');
+  const lines = detailsOf(env, post, 'JP');
+  assert.strictEqual(lines[0], '🛏 1ベッドルーム | 🛁 1バスルーム');
+  assert.ok(!JSON.parse(run(env, 'JSON.stringify(__n)')).some((x) => /Bed|Bath/i.test(x)), 'Bed/Bath never reached the translator');
+});
+test('BEDBATH: "1 Bedroom Duplex" stays an ordinary bullet', () => {
+  const env = makeEnv();
+  const post = sourcePost.replace('✅ 1 Bedroom | 1 Bathroom', '✅ 1 Bedroom Duplex');
+  const out = run(env, `fromBoldSansSerif(assembleListing(parseListingText(${JSON.stringify(post)}), 'EN'))`);
+  assert.ok(/✅ 1 Bedroom Duplex/.test(out) && !/🛏/.test(out));
+});
+test('BEDBATH: a post built from the facts puts the line first, and reading it back gives the same bedrooms and bathrooms', () => {
+  const env = makeEnv();
+  const t = run(env, `unitFactsToChannelText({ buildingName: 'Gato Tower', facts: { price: 185000, listingType: 'resale', bedrooms: 2, bathrooms: 2, floor: '14', sqm: 85 }, features: [], extraFeatures: [], location: 'BKK1', city: 'Phnom Penh' })`);
+  const body = t.split('UNIT DETAILS\n')[1].split('\n');
+  assert.deepStrictEqual(body.slice(0, 3), ['🛏 2 Beds | 🛁 2 Baths', '✅ 14th Floor', '✅ 85 sqm']);
+  const back = JSON.parse(run(env, `JSON.stringify(parseUnitFacts(${JSON.stringify(t)}))`));
+  assert.strictEqual(back.bedrooms, 2); assert.strictEqual(back.bathrooms, 2); assert.strictEqual(back.floor, '14'); assert.strictEqual(back.sqm, 85);
+});
+test('BEDBATH: the website draft reader understands the emoji line, including 1.5 baths', () => {
+  const env = makeEnv();
+  const f = JSON.parse(run(env, `JSON.stringify(parseTelegramPost('#ForSale $99,000\\nGATO TOWER | 2BR UNIT\\nUNIT DETAILS\\n🛏 2 Beds | 🛁 1.5 Baths\\n✅ 6th Floor\\n✅ 70 sqm'))`));
+  assert.strictEqual(f.bedrooms, 2); assert.strictEqual(f.bathrooms, 1.5); assert.strictEqual(f.floor, '6'); assert.strictEqual(f.sqm, 70);
+});
+test('BEDBATH: a post forwarded from your own channel keeps the line in the JP copy without translating it', () => {
+  const env = makeEnv();
+  run(env, `LanguageApp.translate = function (t, f, to) { return '[' + to + '] ' + t; }`);
+  const out = run(env, `translateWholeText('UNIT DETAILS\\n🛏 2 Beds | 🛁 2 Baths\\n✅ 9th Floor', 'JP')`);
+  assert.ok(out.split('\\n').includes('🛏 2ベッドルーム | 🛁 2バスルーム') || out.split('\n').includes('🛏 2ベッドルーム | 🛁 2バスルーム'), out);
+});
+
 console.log(failures ? `\n${failures} FAILED` : '\nALL PASSED');
 process.exit(failures ? 1 : 0);
