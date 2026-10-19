@@ -2485,7 +2485,9 @@ function duplicateWarningText(twins) {
   const label = function (st) { return st === 'active' ? 'live' : (st === 'draft' ? 'hidden draft' : st); };
   return 'Possible duplicate. The website already has ' + (twins.length === 1 ? 'a unit' : twins.length + ' units') + ' like this one in the same building:\n\n' +
     twins.map(function (t) { return t.refCode + ': ' + t.title + ', ' + formatUsd(t.price) + ' (' + label(t.status) + ')'; }).join('\n') +
-    '\n\nIf it is the same unit, cancel and change the price of the existing one instead (send "' + twins[0].refCode + ' price reduced to $..."). Otherwise create another.';
+    (twins.every(function (t) { return t.status === 'sold' || t.status === 'rented' || t.status === 'inactive'; })
+      ? '\n\nThe existing one is no longer live, so this may be the same unit listed again. Create another if it is.'
+      : '\n\nIf it is the same unit, cancel and change the price of the existing one instead (send "' + twins[0].refCode + ' price reduced to $..."). Otherwise create another.');
 }
 
 // Returns true if these photos belong to an album whose text was already handled.
