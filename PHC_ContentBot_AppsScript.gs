@@ -493,7 +493,8 @@ function parseListingText(text) {
   let forSale = '', forRent = '', title = '', location = '';
   const bullets = []; // { icon, text }
   let seenBullet = false;
-  const bulletIcons = ['✅', '💧', '⚡', '🚗', '💼'];
+  const bulletIcons = ['✅', '💧', '⚡', '🚗', '💼', '💳'];
+  let urgent = false;
   let section = ''; // the last heading seen (UNIT DETAILS, FEATURES, FACILITIES ...)
 
   for (let i = 0; i < lines.length; i++) {
@@ -503,6 +504,7 @@ function parseListingText(text) {
 
     // Price line(s) — either on separate lines, or combined as
     // "#ForSale $X | #ForRent $Y/month" on one line.
+    if (/#ForSale|#ForRent/i.test(plain) && /\burgent\b/i.test(plain)) urgent = true; // "#ForSale $99,000 (Urgent)"
     if (/#ForSale/i.test(plain)) {
       const m = line.match(/#ForSale\s*(\$[\d,]+)/i);
       if (m) forSale = m[1];
@@ -532,7 +534,7 @@ function parseListingText(text) {
     if (line.includes('|') && !title && !seenBullet) { title = line; continue; }
   }
 
-  return { forSale, forRent, title, location, bullets, sourceLang: 'en' };
+  return { forSale, forRent, title, location, bullets, sourceLang: 'en', urgent };
 }
 
 // ── Foreign-language listing parsing (e.g. Chinese source channels) ────
@@ -679,6 +681,17 @@ function stripKhmerDuplicateText(line) {
     .trim();
 }
 
+// "Urgent Sale – Time Square 8 | 2-Bedroom Resale Unit" -> "Time Square 8 | 2BR Resale" (the house style, as in "GATO TOWER | 2BR UNIT").
+function cleanFreeformTitle(line) {
+  return String(line || '')
+    .replace(/\(\s*urgent\s*\)/gi, '')
+    .replace(/^\s*urgent\s*(?:sale|rent|rental|deal|resale)?\s*[–—:|\-]+\s*/i, '')
+    .replace(/\b([0-9]{1,2})\s*-?\s*(?:bed\s?rooms?|beds?|br)\b/gi, '$1BR')
+    .replace(/\b(resale|rental|rent|sale)\s+unit\s*$/i, '$1')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+}
+
 function parseFreeformListing(text) {
   const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
   const contactLineRegex = /📞|📱|🌐|whatsapp|telegram|t\.me\/|facebook\.com|https?:\/\/|contact for viewing|\btel\s*[:.]|\bphone\s*[:.]|\bhotline\b|\bcall\s*[:.]/i;
@@ -692,6 +705,8 @@ function parseFreeformListing(text) {
   let forSale = '', forRent = '', title = '', location = '';
   const bullets = [];
   let titleFound = false;
+  const urgent = /\burgent\b/i.test(text); // shown as "(Urgent)" after the price, never as words in the title
+  const paymentLineRegex = /^(monthly(?:\s+payment)?|handover(?:\s+payment)?|down\s*payment|booking(?:\s+fee)?|deposit|instal+ments?|final\s+payment|balance(?:\s+payment)?)\b/i;
 
   lines.forEach(rawLine => {
     // Strip Khmer duplicate text first, then any leading bullet/emoji marker
@@ -715,11 +730,16 @@ function parseFreeformListing(text) {
       return;
     }
 
-    if (!titleFound) { title = line; titleFound = true; return; }
-    bullets.push({ icon: '✅', text: line });
+    if (/^urgent(\s+(sale|rent|rental|deal|resale))?[\s!.]*$/i.test(line)) return; // a line that only says Urgent: it becomes the (Urgent) mark
+    if (!titleFound) {
+      const cleaned = cleanFreeformTitle(line);
+      if (cleaned) { title = cleaned; titleFound = true; }
+      return;
+    }
+    bullets.push({ icon: paymentLineRegex.test(line) ? '💳' : '✅', text: line });
   });
 
-  return { forSale, forRent, title, location, bullets, sourceLang: 'en' };
+  return { forSale, forRent, title, location, bullets, sourceLang: 'en', urgent };
 }
 
 // ── Bullet bucketing — one unified structure for every listing type ────
@@ -794,15 +814,18 @@ function formatBedBath(bb, lang) {
 }
 
 function bucketListing(bullets) {
-  const details = [], features = [], utilities = [];
+  const details = [], features = [], payments = [], utilities = [];
   bullets.forEach(b => {
     if (b.icon === '✅') {
       (classifyBullet(b.text) === 'features' ? features : details).push(b);
+    } else if (b.icon === '💳') {
+      payments.push(b);
     } else {
       utilities.push(b);
     }
   });
   const sections = [['UNIT DETAILS', details], ['FEATURES', features]];
+  if (payments.length) sections.push(['PAYMENT PLAN', payments]);
   if (utilities.length) sections.push(['UTILITIES', utilities]);
   return sections;
 }
@@ -899,6 +922,10 @@ function translateWholeText(text, lang) {
   }).join('\n');
 }
 
+// " (Urgent)" after the price, worded by this table in every language (not by the translator).
+const URGENT_WORD = { EN: 'Urgent', JP: '緊急', RU: 'Срочно', DE: 'Dringend' };
+function urgentSuffix(fields, lang) { return fields && fields.urgent ? ' (' + (URGENT_WORD[lang] || URGENT_WORD.EN) + ')' : ''; }
+
 function assembleListing(fields, lang) {
   // Bucketing classifies on ENGLISH text always — normalize to EN first
   // regardless of source or target language, then translate each already-
@@ -937,8 +964,8 @@ function assembleListing(fields, lang) {
   if (bedbath) displaySections[0][1].unshift({ icon: '', text: formatBedBath(bedbath, lang), plain: true });
 
   let priceLine = '';
-  if (fields.forSale) priceLine += '#ForSale ' + fields.forSale + '\n';
-  if (fields.forRent) priceLine += '#ForRent ' + fields.forRent + '\n';
+  if (fields.forSale) priceLine += '#ForSale ' + fields.forSale + urgentSuffix(fields, lang) + '\n';
+  if (fields.forRent) priceLine += '#ForRent ' + fields.forRent + (fields.forSale ? '' : urgentSuffix(fields, lang)) + '\n';
 
   let body = priceLine.trim() + '\n\n' + toBoldSansSerif(title) + '\n';
   if (location) body += '📍 ' + location + '\n';
@@ -1024,8 +1051,8 @@ function assembleCompactListing(fields, lang, bullets, bedbath, titleEn, locatio
   const where = [building].concat(areaParts).filter(Boolean).join(', ');
 
   let priceLine = '';
-  if (fields.forSale) priceLine += '#ForSale ' + fields.forSale + '\n';
-  if (fields.forRent) priceLine += '#ForRent ' + fields.forRent + '\n';
+  if (fields.forSale) priceLine += '#ForSale ' + fields.forSale + urgentSuffix(fields, lang) + '\n';
+  if (fields.forRent) priceLine += '#ForRent ' + fields.forRent + (fields.forSale ? '' : urgentSuffix(fields, lang)) + '\n';
   let body = priceLine.trim() + '\n\n';
   if (where) body += '📍 ' + where + '\n\n';
   if (facts.length) body += facts.join(' | ') + '\n\n';

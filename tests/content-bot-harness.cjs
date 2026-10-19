@@ -1862,5 +1862,62 @@ test('FREEFORM: label forms still do not swallow other bedroom wording ("1 Bedro
   assert.deepStrictEqual(JSON.parse(run(env, `JSON.stringify(parseBedBathText('Unit Type: Studio'))`)), { beds: 0, baths: null });
 });
 
+test('URGENT: "Urgent Sale –" in the title becomes "(Urgent)" after the price, and the title is the short house style', () => {
+  const env = makeEnv();
+  const en = assembleEn(env, ts8b);
+  const lines = en.split('\n');
+  assert.strictEqual(lines[0], '#ForSale $99,000 (Urgent)', en);
+  assert.ok(/^(\S+ )*/.test(lines[2]) && plainFont(lines[2]) === 'xxxx xxxxxx x | xxx xxxxxx', 'title: ' + lines[2]);
+  assert.ok(!/Urgent Sale|2-Bedroom|Resale Unit/.test(en.replace(lines[0], '')), en);
+});
+
+test('URGENT: the mark is worded by a table in every language and the price is untouched', () => {
+  const env = makeEnv();
+  run(env, `processChannelListing(${CHAT}, ${JSON.stringify(ts8b)}, [], false, null, null)`);
+  const first = env.sheetData.slice(1).map((r) => r[3].split('\n')[0]);
+  assert.deepStrictEqual(first, ['#ForSale $99,000 (Urgent)', '#ForSale $99,000 (緊急)', '#ForSale $99,000 (Срочно)', '#ForSale $99,000 (Dringend)']);
+});
+
+test('URGENT: a post that is not urgent gets no mark, and "Urgent" never lands in the title or as a bullet', () => {
+  const env = makeEnv();
+  const en = assembleEn(env, ts8b.replace('Urgent Sale – ', '').replace('Facing: North', 'Facing: North'));
+  assert.strictEqual(en.split('\n')[0], '#ForSale $99,000', en);
+  const f = freeform(makeEnv(), '🔥 URGENT SALE 🔥\nTime Square 8 | 2 Bedroom Resale\nFloor: 3\nSize: 30 sqm\nPrice: $60,000');
+  assert.strictEqual(f.urgent, true); assert.strictEqual(f.title, 'Time Square 8 | 2BR Resale');
+  assert.ok(!f.bullets.some((b) => /urgent/i.test(b.text)));
+});
+
+test('URGENT: an own-template post with "(Urgent)" after the price keeps it when the bot rebuilds the post', () => {
+  const env = makeEnv();
+  const own = '#ForSale $55,000 (Urgent)\n\nMORGAN ENMAISON | STUDIO\n📍 River View\n\n――――――――――\n\nUNIT DETAILS\n✅ Studio Unit\n✅ 5th Floor\n\n📞 011 111 111';
+  const en = assembleEn(env, own);
+  assert.strictEqual(en.split('\n')[0], '#ForSale $55,000 (Urgent)', en);
+});
+
+test('PAYMENT: monthly, handover and down payment lines get their own PAYMENT PLAN block with 💳, and the rest stay in UNIT DETAILS', () => {
+  const en = assembleEn(makeEnv(), ts8b);
+  const i = en.indexOf('PAYMENT PLAN') >= 0 ? en.indexOf('PAYMENT PLAN') : en.search(/[\u{1D400}-\u{1D7FF}]{7} [\u{1D400}-\u{1D7FF}]{4}\n💳/u);
+  const plain = plainFont(en);
+  assert.ok(/xxxxxxx xxxx\n💳 Monthly Payment: \$678 from November 2026 to March 2029\n💳 Handover Payment: \$50,888\n/.test(plain), en);
+  assert.ok(/✅ Floor: 32/.test(en) && !/✅ Monthly|✅ Handover/.test(en), en);
+  const noPay = assembleEn(makeEnv(), 'Studio resale\nFloor: 3\nSize: 30 sqm\nSelling price: $60,000');
+  assert.ok(!/💳/.test(noPay), noPay);
+});
+
+test('PAYMENT: a rental whose price line says "Monthly rent" is still the price, not a payment plan line', () => {
+  const f = freeform(makeEnv(), 'Studio for rent\nFloor: 3\nSize: 30 sqm\nMonthly rent: $550');
+  assert.strictEqual(f.forRent, '$550/month');
+  assert.ok(!f.bullets.some((b) => b.icon === '💳'));
+});
+
+test('PAYMENT: the 💳 lines survive when the bot reads its own post back and rebuilds it', () => {
+  const env = makeEnv();
+  const once = assembleEn(env, ts8b);
+  const env2 = makeEnv();
+  const twice = assembleEn(env2, once);
+  assert.ok(/💳 Monthly Payment/.test(twice) && /💳 Handover Payment/.test(twice), twice);
+  assert.strictEqual(twice.split('\n')[0], '#ForSale $99,000 (Urgent)');
+});
+
 console.log(failures ? `\n${failures} FAILED` : '\nALL PASSED');
 process.exit(failures ? 1 : 0);
