@@ -1673,5 +1673,106 @@ test('BEDBATH: a post forwarded from your own channel keeps the line in the JP c
   assert.ok(out.split('\\n').includes('🛏 2ベッドルーム | 🛁 2バスルーム') || out.split('\n').includes('🛏 2ベッドルーム | 🛁 2バスルーム'), out);
 });
 
+// ====================== videos (v: prefix) ======================
+const videoMsg = (uid, fid, text, extra) => ({ update_id: uid, message: Object.assign({ message_id: uid, chat: { id: CHAT }, caption: text, video: { file_id: fid, mime_type: 'video/mp4' } }, extra || {}) });
+const mediaCalls = (env, kind) => env.calls.filter((c) => c.url.includes('/' + kind)).map((c) => c.opts.payload);
+// like fastClock, but Date stays a real constructor (the listing flow builds timestamps with new Date())
+const tickClock = (env) => run(env, `(function(){ var t = Date.now(); Date.now = function(){ t += 15000; return t; }; })()`);
+const finishRoute = (env) => { if (Object.keys(env.cache).some((k) => k.startsWith('unitmenu_'))) menuTap(env, 'chan'); };
+
+test('VIDEO: a listing sent with one video says "1 video" (not "0 photos"), keeps it in the Queue row and sends it with /sendVideo', () => {
+  const env = makeEnv(); tickClock(env);
+  env.updates = [[videoMsg(1001, 'VID1', residenceL(env))]];
+  run(env, `checkForUpdates()`);
+  finishRoute(env);
+  const rows = env.sheetData.slice(1);
+  assert.deepStrictEqual(rows.map((r) => r[2]), ['EN', 'JP', 'RU', 'DE']);
+  rows.forEach((r) => assert.strictEqual(r[8], JSON.stringify(['v:VID1'])));
+  const texts = env.sent().map((p) => p.text);
+  assert.ok(texts.some((t) => /Listing detected \(1 video\)/.test(t)), texts.join(' | '));
+  assert.ok(!texts.some((t) => /0 photos/.test(t)), 'must not claim 0 photos');
+  const vids = mediaCalls(env, 'sendVideo');
+  assert.strictEqual(vids.length, 1, 'one review card sent as a video');
+  assert.strictEqual(vids[0].video, 'VID1', 'Telegram gets the bare file_id, never the v: prefix');
+  assert.ok(/New listing ready/.test(vids[0].caption) && /Approve All/.test(vids[0].reply_markup), 'review card keeps its text and buttons');
+  assert.strictEqual(mediaCalls(env, 'sendPhoto').length, 0, 'a video is never sent through /sendPhoto');
+  assert.strictEqual(env.telegramRejected || 0, 0);
+});
+
+test('VIDEO: an album with photos and a video keeps both, in order, and the review card uses the first item', () => {
+  const env = makeEnv(); tickClock(env);
+  const photo = { update_id: 1101, message: { message_id: 1101, chat: { id: CHAT }, media_group_id: 'GV', photo: [{ file_id: 'P1s' }, { file_id: 'P1' }], caption: residenceL(env) } };
+  const vid = { update_id: 1102, message: { message_id: 1102, chat: { id: CHAT }, media_group_id: 'GV', video: { file_id: 'V1' } } };
+  env.updates = [[photo, vid]];
+  run(env, `checkForUpdates()`);
+  finishRoute(env);
+  const rows = env.sheetData.slice(1);
+  assert.strictEqual(rows.length, 4);
+  assert.strictEqual(rows[0][8], JSON.stringify(['P1', 'v:V1']));
+  const texts = env.sent().map((p) => p.text);
+  assert.ok(texts.some((t) => /Listing detected \(1 photo and 1 video\)/.test(t)), texts.join(' | '));
+  assert.strictEqual(mediaCalls(env, 'sendPhoto').length, 1, 'the first item (a photo) is the review card');
+  assert.strictEqual(env.telegramRejected || 0, 0);
+});
+
+test('VIDEO: posting to a channel: one video carries the caption and buttons, an album marks each item photo or video with bare ids', () => {
+  const env = makeEnv();
+  const kb = { inline_keyboard: [[{ text: 'Contact', url: 'https://t.me/x' }]] };
+  run(env, `postGalleryWithButtons('-100777', ['v:V9'], 'Caption', ${JSON.stringify(kb)})`);
+  const v = mediaCalls(env, 'sendVideo');
+  assert.strictEqual(v.length, 1);
+  assert.strictEqual(v[0].video, 'V9'); assert.strictEqual(v[0].caption, 'Caption'); assert.ok(/Contact/.test(v[0].reply_markup));
+  run(env, `postGalleryWithButtons('-100777', ['P1', 'v:V2', 'P3'], 'Caption', ${JSON.stringify(kb)})`);
+  const g = mediaCalls(env, 'sendMediaGroup');
+  assert.strictEqual(g.length, 1);
+  assert.deepStrictEqual(JSON.parse(g[0].media), [{ type: 'photo', media: 'P1' }, { type: 'video', media: 'V2' }, { type: 'photo', media: 'P3' }]);
+  const texts = env.sent().map((p) => p.text);
+  assert.ok(texts.includes('Caption'), 'the caption follows the album as its own message');
+});
+
+test('VIDEO: rows written before videos existed still work exactly as before (JSON list, bare string, empty)', () => {
+  const env = makeEnv();
+  assert.deepStrictEqual(JSON.parse(run(env, `JSON.stringify(parsePhotoIds('["A","B"]'))`)), ['A', 'B']);
+  assert.deepStrictEqual(JSON.parse(run(env, `JSON.stringify(parsePhotoIds('AgACsingle'))`)), ['AgACsingle']);
+  assert.deepStrictEqual(JSON.parse(run(env, `JSON.stringify(parsePhotoIds(''))`)), []);
+  assert.deepStrictEqual(JSON.parse(run(env, `JSON.stringify(parsePhotoIds('v:VID'))`)), ['v:VID']);
+  run(env, `postGalleryWithButtons('-100777', ['AgACsingle'], 'Old row', null)`);
+  const p = mediaCalls(env, 'sendPhoto');
+  assert.strictEqual(p.length, 1); assert.strictEqual(p[0].photo, 'AgACsingle');
+  assert.strictEqual(mediaCalls(env, 'sendVideo').length, 0);
+  run(env, `postGalleryWithButtons('-100777', ['A', 'B'], 'Old album', null)`);
+  assert.deepStrictEqual(JSON.parse(mediaCalls(env, 'sendMediaGroup')[0].media), [{ type: 'photo', media: 'A' }, { type: 'photo', media: 'B' }]);
+});
+
+test('VIDEO: an old photo-only listing still goes through the whole flow with the same row, count text and /sendPhoto review card', () => {
+  const env = makeEnv();
+  env.ctx.__post = residenceL(env);
+  run(env, `handleIncomingMessage(${CHAT}, __post, ['P1', 'P2'], false, null, null, ['P1', 'P2'])`);
+  menuTap(env, 'chan');
+  const rows = env.sheetData.slice(1);
+  rows.forEach((r) => assert.strictEqual(r[8], JSON.stringify(['P1', 'P2'])));
+  assert.ok(env.sent().some((p) => /Listing detected \(2 photos\)/.test(p.text)));
+  assert.strictEqual(mediaCalls(env, 'sendPhoto').length, 1);
+  assert.strictEqual(mediaCalls(env, 'sendVideo').length, 0);
+});
+
+test('VIDEO: count wording', () => {
+  const env = makeEnv();
+  const t = (a) => run(env, `mediaCountText(${JSON.stringify(a)})`);
+  assert.strictEqual(t([]), '0 photos'); assert.strictEqual(t(['a']), '1 photo'); assert.strictEqual(t(['a', 'b']), '2 photos');
+  assert.strictEqual(t(['v:x']), '1 video'); assert.strictEqual(t(['v:x', 'v:y']), '2 videos');
+  assert.strictEqual(t(['a', 'v:x']), '1 photo and 1 video'); assert.strictEqual(t(['a', 'b', 'v:x']), '2 photos and 1 video');
+});
+
+test('VIDEO: the #unit website intake never mistakes a video for a photo to upload', () => {
+  const env = makeEnv(); fastClock(env);
+  env.updates = [[videoMsg(1201, 'VIDU', caption)]];
+  run(env, `checkForUpdates()`);
+  const key = Object.keys(env.cache).find((k) => k.startsWith('unitdraft_'));
+  assert.ok(key, 'a draft starts');
+  assert.deepStrictEqual(JSON.parse(env.cache[key]).images, []);
+  assert.ok(!env.intakeLog.some((p) => p.action === 'photos'), 'no photo upload for a video');
+});
+
 console.log(failures ? `\n${failures} FAILED` : '\nALL PASSED');
 process.exit(failures ? 1 : 0);

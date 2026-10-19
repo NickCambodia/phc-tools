@@ -178,7 +178,7 @@ function pollTelegramOnce(timeoutSeconds) {
       } else if (m.media_group_id) {
         const gid = m.media_group_id;
         if (!mediaGroups[gid]) mediaGroups[gid] = { chatId: m.chat.id, captionText: '', captionEntities: null, photoIds: [], imageIds: [], isForwarded: false, sourceUsername: null };
-        const photoId = getLargestPhotoId(m);
+        const photoId = getMediaId(m); // a photo's file_id, or 'v:' + a video's file_id
         if (photoId) mediaGroups[gid].photoIds.push(photoId);
         const imageId = getImageFileId(m); // photos AND image files: used only by the #unit intake
         if (imageId) mediaGroups[gid].imageIds.push(imageId);
@@ -196,7 +196,7 @@ function pollTelegramOnce(timeoutSeconds) {
 
   singleMessages.forEach(m => {
     try {
-      const photoId = getLargestPhotoId(m);
+      const photoId = getMediaId(m);
       const imageId = getImageFileId(m);
       warnAboutHeic(m);
       handleIncomingMessage(m.chat.id, m.caption || m.text || '', photoId ? [photoId] : [], isMessageForwarded(m), getForwardSourceUsername(m), getMessageEntities(m), imageId ? [imageId] : []);
@@ -399,9 +399,8 @@ function processChannelListing(chatId, text, photoFileIds, isForwarded, sourceUs
   const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
   mark('opened the sheet');
   const photoJson = photoFileIds && photoFileIds.length ? JSON.stringify(photoFileIds) : '';
-  const photoCount = photoFileIds ? photoFileIds.length : 0;
 
-  sendTelegramMessage(REVIEWER_CHAT_ID, '📥 Listing detected (' + photoCount + ' photo' + (photoCount === 1 ? '' : 's') + ') — generating EN/JP/RU/DE versions for your review...');
+  sendTelegramMessage(REVIEWER_CHAT_ID, '📥 Listing detected (' + mediaCountText(photoFileIds) + ') — generating EN/JP/RU/DE versions for your review...');
 
   mark('sent "Listing detected"');
   // Own-channel forwards carry their own contact info (Nick's personal
@@ -1111,7 +1110,7 @@ function handleCallback(cb) {
       sheet.getRange(rowNum, headers.indexOf('postedMsgId') + 1).setValue(postedMsgId || '');
       sheet.getRange(rowNum, headers.indexOf('postedAt') + 1).setValue(new Date().toISOString());
       finishReviewMessage(cb.message.chat.id, cb.message.message_id, rowObj.content + '\n\n✅ POSTED to ' + rowObj.language, photoIds.length > 0);
-      sendTelegramMessage(cb.message.chat.id, '✅ APPROVED — posted to ' + rowObj.language + ' (' + photoIds.length + ' photo' + (photoIds.length === 1 ? '' : 's') + '):\n"' + rowObj.content + '"');
+      sendTelegramMessage(cb.message.chat.id, '✅ APPROVED — posted to ' + rowObj.language + ' (' + mediaCountText(photoIds) + '):\n"' + rowObj.content + '"');
       answerCallback(cb.id, 'Posted to ' + rowObj.language + '!');
     } else if (action === 'reject') {
       sheet.getRange(rowNum, headers.indexOf('status') + 1).setValue('Rejected');
@@ -1517,7 +1516,7 @@ function sendCombinedReviewMessage(sheet, headers, sourceId, photoFileIds) {
   };
 
   const msg = photoFileIds && photoFileIds.length
-    ? sendTelegramPhoto(REVIEWER_CHAT_ID, photoFileIds[0], reviewText, keyboard, shiftedEntities)
+    ? sendMedia(REVIEWER_CHAT_ID, photoFileIds[0], reviewText, keyboard, shiftedEntities)
     : sendTelegramMessage(REVIEWER_CHAT_ID, reviewText, keyboard, shiftedEntities);
 
   matchingRows.forEach(rowNum => {
@@ -1540,7 +1539,7 @@ function sendRowForReview(sheet, headers, rowNum) {
   const content = row[contentIdx];
   const photoIds = parsePhotoIds(photoIdx > -1 ? row[photoIdx] : '');
 
-  const reviewText = '📝 New content ready — ' + language + (photoIds.length > 1 ? ' (' + photoIds.length + ' photos, showing 1st)' : '') + '\n\n' + content;
+  const reviewText = '📝 New content ready — ' + language + (photoIds.length > 1 ? ' (' + mediaCountText(photoIds) + ', showing 1st)' : '') + '\n\n' + content;
   const keyboard = {
     inline_keyboard: [[
       { text: '✅ Approve', callback_data: 'approve_' + id },
@@ -1551,7 +1550,7 @@ function sendRowForReview(sheet, headers, rowNum) {
   // Review preview only shows the first photo (Telegram albums can't carry
   // inline buttons) — the final channel post sends all photos as an album.
   const msg = photoIds.length
-    ? sendTelegramPhoto(REVIEWER_CHAT_ID, photoIds[0], reviewText, keyboard)
+    ? sendMedia(REVIEWER_CHAT_ID, photoIds[0], reviewText, keyboard)
     : sendTelegramMessage(REVIEWER_CHAT_ID, reviewText, keyboard);
 
   sheet.getRange(rowNum, statusIdx + 1).setValue('Pending Review');
@@ -1650,7 +1649,7 @@ function sendTelegramPoll(chatId, question, options, isAnonymous, allowsMultiple
 function sendTelegramMediaGroup(chatId, fileIds, caption, entities) {
   const token = PropertiesService.getScriptProperties().getProperty('BOT_TOKEN');
   const media = fileIds.map((id, i) => {
-    const item = { type: 'photo', media: id };
+    const item = { type: isVideoId(id) ? 'video' : 'photo', media: bareFileId(id) };
     if (i === 0) {
       item.caption = caption; // Telegram only shows a caption from the first item
       if (entities) item.caption_entities = entities; // not stringified — nested inside the media JSON below
@@ -1686,7 +1685,7 @@ function sendTelegramMediaGroup(chatId, fileIds, caption, entities) {
 // This version needs neither trick — Nick's idea, 2026-07-22.
 function postGalleryWithButtons(channelId, photoIds, caption, contactKeyboard, entities) {
   if (photoIds.length === 1) {
-    return sendTelegramPhoto(channelId, photoIds[0], caption, contactKeyboard, entities);
+    return sendMedia(channelId, photoIds[0], caption, contactKeyboard, entities);
   }
   sendTelegramMediaGroup(channelId, photoIds); // no caption — it goes in its own message below
   return sendTelegramMessage(channelId, caption, contactKeyboard, entities);
@@ -1697,6 +1696,55 @@ function getLargestPhotoId(message) {
     return message.photo[message.photo.length - 1].file_id; // Telegram lists smallest→largest
   }
   return null;
+}
+
+// Videos ride in the same list as photos (the Queue sheet's photoFileId column, album handling, review cards) by putting
+// 'v:' in front of the file_id. Rows written before videos were supported have no prefix, so they read exactly as before.
+const VIDEO_ID_PREFIX = 'v:';
+function isVideoId(id) { return typeof id === 'string' && id.indexOf(VIDEO_ID_PREFIX) === 0; }
+function bareFileId(id) { return isVideoId(id) ? id.slice(VIDEO_ID_PREFIX.length) : id; }
+
+// A photo's file_id, or 'v:' + a video's file_id (what the listing flow stores and sends). null when the message has neither.
+function getMediaId(message) {
+  const photo = getLargestPhotoId(message);
+  if (photo) return photo;
+  if (message.video && message.video.file_id) return VIDEO_ID_PREFIX + message.video.file_id;
+  return null;
+}
+
+// Only the real photos of a list (the website photo upload cannot use a video).
+function photosOnly(ids) { return (ids || []).filter(function (id) { return !isVideoId(id); }); }
+
+// "3 photos", "1 video", "2 photos and 1 video", "0 photos"
+function mediaCountText(ids) {
+  const list = ids || [];
+  const videos = list.filter(isVideoId).length;
+  const photos = list.length - videos;
+  const plural = function (n, word) { return n + ' ' + word + (n === 1 ? '' : 's'); };
+  if (videos === 0) return plural(photos, 'photo');
+  if (photos === 0) return plural(videos, 'video');
+  return plural(photos, 'photo') + ' and ' + plural(videos, 'video');
+}
+
+// One media message (photo or video) with a caption and optional buttons.
+function sendMedia(chatId, id, caption, replyMarkup, entities) {
+  return isVideoId(id) ? sendTelegramVideo(chatId, bareFileId(id), caption, replyMarkup, entities) : sendTelegramPhoto(chatId, id, caption, replyMarkup, entities);
+}
+
+function sendTelegramVideo(chatId, fileId, caption, replyMarkup, entities) {
+  const token = PropertiesService.getScriptProperties().getProperty('BOT_TOKEN');
+  const payload = { chat_id: chatId, video: fileId, caption: caption, supports_streaming: true };
+  if (replyMarkup) payload.reply_markup = JSON.stringify(replyMarkup);
+  if (entities) payload.caption_entities = JSON.stringify(entities);
+  const resp = UrlFetchApp.fetch('https://api.telegram.org/bot' + token + '/sendVideo', {
+    method: 'post',
+    contentType: 'application/x-www-form-urlencoded',
+    payload: payload,
+    muteHttpExceptions: true,
+  });
+  const data = JSON.parse(resp.getContentText());
+  if (!data.ok) Logger.log('sendVideo failed: ' + resp.getContentText());
+  return data.result;
 }
 
 // Edits the review message (text or photo caption) once handled, removing the buttons.
@@ -2356,7 +2404,7 @@ function saveUnitMenu(m) { unitCache().put(menuCache(m.id), JSON.stringify(m), U
 function routeIncoming(chatId, text, photoFileIds, isForwarded, sourceUsername, originalEntities, imageFileIds, mediaGroupId) {
   chatId = String(chatId);
   text = String(text || '');
-  let images = (imageFileIds && imageFileIds.length ? imageFileIds : (photoFileIds || [])).slice(0, UNIT_MAX_PHOTOS);
+  let images = (imageFileIds && imageFileIds.length ? imageFileIds : photosOnly(photoFileIds)).slice(0, UNIT_MAX_PHOTOS);
   let photoIds = (photoFileIds || []).slice(0, UNIT_MAX_PHOTOS);
   const orig = { text: text, photoIds: photoIds, isForwarded: !!isForwarded, sourceUsername: sourceUsername || null, entities: originalEntities || null };
 
@@ -3198,7 +3246,7 @@ function offerCreatePage(chatId, offer, allowCreate) {
     const newPrice = parseMoneyAmount(offer.amount[1], offer.amount[2]);
     if (newPrice > 0) text = text.replace(/\$\s*\d[\d,]*(?:\.\d+)?\s*[km]?/i, formatUsd(newPrice)); // the new price replaces the first (main) price
   }
-  const m = { id: newUnitDraftId(), orig: { text: text, photoIds: offer.photoIds || [], isForwarded: false, sourceUsername: null, entities: null }, images: offer.photoIds || [], mediaGroupId: null, used: null };
+  const m = { id: newUnitDraftId(), orig: { text: text, photoIds: offer.photoIds || [], isForwarded: false, sourceUsername: null, entities: null }, images: photosOnly(offer.photoIds), mediaGroupId: null, used: null };
   saveUnitMenu(m);
   unitSessionTouch();
   sendTelegramMessage(chatId, 'This post has no page on the website, so only the channel changed.\nCreate a website page from this post?',
