@@ -1774,5 +1774,60 @@ test('VIDEO: the #unit website intake never mistakes a video for a photo to uplo
   assert.ok(!env.intakeLog.some((p) => p.action === 'photos'), 'no photo upload for a video');
 });
 
+// ====================== raw agent post (Time Square 8): freeform parser ======================
+const ts8Post = ['🔥 Time Square 8 🔥 Resale', 'Property Details', 'Bedroom: 2', 'Floor: 18th', 'Size: 78 sqm', 'Furnished: Fully furnished', 'View: City view', 'Selling price: $99,000', 'Payment Plan', 'Monthly Payment: $550', 'Down payment 30%', '📞 012 345 678'].join('\n');
+const freeform = (env, text) => JSON.parse(run(env, `JSON.stringify(parseFreeformListing(${JSON.stringify(text)}))`));
+
+test('FREEFORM: a 🔥 in the title line does not make it a contact line, and "Property Details" is not the title', () => {
+  const f = freeform(makeEnv(), ts8Post);
+  assert.strictEqual(f.title, 'Time Square 8 Resale');
+});
+
+test('FREEFORM: a post that says selling/resale is #ForSale even with "Monthly Payment" in its payment plan', () => {
+  const f = freeform(makeEnv(), ts8Post);
+  assert.strictEqual(f.forSale, '$99,000'); assert.strictEqual(f.forRent, '');
+  assert.strictEqual(freeform(makeEnv(), 'Studio for sale\nFloor: 3\nSize: 30 sqm\nPrice: $60,000\nMonthly Payment: $400').forSale, '$60,000');
+  assert.strictEqual(freeform(makeEnv(), 'Studio resale\nFloor: 3\nSize: 30 sqm\nPrice: $60,000\nMonthly: $400').forRent, '');
+});
+
+test('FREEFORM: real rentals are still rentals, and "monthly" alone is no longer a rent signal', () => {
+  const r = freeform(makeEnv(), 'Studio for rent\nFloor: 3\nSize: 30 sqm\nRent: $550/month');
+  assert.strictEqual(r.forRent, '$550/month'); assert.strictEqual(r.forSale, '');
+  const r2 = freeform(makeEnv(), 'Studio\nFloor: 3\nSize: 30 sqm\nPrice: $550 per month');
+  assert.strictEqual(r2.forRent, '$550/month');
+  const s = freeform(makeEnv(), 'Studio\nFloor: 3\nSize: 30 sqm\nPrice: $60,000\nMonthly payment plan: $400');
+  assert.strictEqual(s.forSale, '$60,000'); assert.strictEqual(s.forRent, '');
+});
+
+test('FREEFORM: section headings (Property Details, Payment Plan) never become a ticked bullet', () => {
+  const f = freeform(makeEnv(), ts8Post);
+  const texts = f.bullets.map((b) => b.text);
+  assert.ok(!texts.some((t) => /^(property details|payment plan)$/i.test(t)), texts.join(' | '));
+  assert.ok(texts.includes('Bedroom: 2') && texts.includes('Down payment 30%'), texts.join(' | '));
+});
+
+test("FREEFORM: another agent's phone line starting with 📞 is dropped, not kept as a bullet", () => {
+  const texts = freeform(makeEnv(), ts8Post).bullets.map((b) => b.text);
+  assert.ok(!texts.some((t) => /012 345 678/.test(t)), texts.join(' | '));
+});
+
+test('FREEFORM: end to end, the post is #ForSale, names the project area from the website, and carries only PHC contact info', () => {
+  const env = makeEnv();
+  env.cache['unitprojects'] = JSON.stringify([{ id: 2, title: 'Time Square 8', location: 'TTP', city: 'Phnom Penh' }]);
+  run(env, `processChannelListing(${CHAT}, ${JSON.stringify(ts8Post)}, [], false, null, null)`);
+  const en = env.sheetData[1][3];
+  assert.ok(/#ForSale \$99,000/.test(en) && !/ForRent/.test(en), en);
+  assert.ok(/📍 TTP, Phnom Penh/.test(en), en);
+  assert.ok(!/Payment Plan|Property Details|012 345 678/i.test(en.replace(/[\u{1D400}-\u{1D7FF}]/gu, '')), en);
+  assert.ok(/011 666 952/.test(en));
+});
+
+test('FREEFORM: a post that already has a 📍 area keeps it, and an unknown project leaves the area empty', () => {
+  const env = makeEnv();
+  env.cache['unitprojects'] = JSON.stringify([{ id: 2, title: 'Time Square 8', location: 'TTP', city: 'Phnom Penh' }]);
+  run(env, `processChannelListing(${CHAT}, ${JSON.stringify('Studio unit\n📍 BKK1, Phnom Penh\nFloor: 3\nSize: 30 sqm\nSelling price: $60,000')}, [], false, null, null)`);
+  assert.ok(/📍 BKK1, Phnom Penh/.test(env.sheetData[1][3]));
+});
+
 console.log(failures ? `\n${failures} FAILED` : '\nALL PASSED');
 process.exit(failures ? 1 : 0);

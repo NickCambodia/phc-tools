@@ -390,6 +390,12 @@ function processChannelListing(chatId, text, photoFileIds, isForwarded, sourceUs
     } else {
       fields = parseFreeformListing(text);
       assembleFn = assembleListing;
+      // The post names no area: take it from the website if it names one of our projects ("Time Square 8" is in TTP, Phnom Penh).
+      if (!fields.location) {
+        let project = null;
+        try { project = findProjectInText(text, fetchUnitProjects()); } catch (e) { Logger.log('project lookup failed: ' + e); }
+        if (project && project.location) fields.location = project.location + (project.city ? ', ' + project.city : '');
+      }
     }
   }
 
@@ -675,10 +681,15 @@ function stripKhmerDuplicateText(line) {
 
 function parseFreeformListing(text) {
   const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
-  const contactLineRegex = /📞|📱|🌐|🔥|whatsapp|telegram|t\.me\/|facebook\.com|https?:\/\/|contact for viewing|\btel\s*[:.]|\bphone\s*[:.]|\bhotline\b|\bcall\s*[:.]/i;
-  const isRentOverall = /\brent\b|\/month|\bmonthly\b/i.test(text);
+  const contactLineRegex = /📞|📱|🌐|whatsapp|telegram|t\.me\/|facebook\.com|https?:\/\/|contact for viewing|\btel\s*[:.]|\bphone\s*[:.]|\bhotline\b|\bcall\s*[:.]/i;
+  // A post that says it is for sale is a sale, whatever else it mentions. "Monthly Payment" in a payment plan is not a rent
+  // signal either; only the word rent or a price per month is.
+  const saysSale = /\b(for sale|forsale|sale|selling|resale|sell)\b/i.test(text);
+  const isRentOverall = !saysSale && /\brent\b|\/\s?month|\bper month\b/i.test(text);
+  // Headings that introduce a block ("Property Details", "Payment Plan") are not facts: no tick, and never the title.
+  const sectionHeadingRegex = /^(property|unit|project|listing)\s+(details|information|info|overview|highlights)$|^(payment\s+(plan|schedule|terms|structure)|features|facilities|amenities|highlights|description|details|specifications|overview|key features|contact|notes?)$/i;
 
-  let forSale = '', forRent = '', title = '';
+  let forSale = '', forRent = '', title = '', location = '';
   const bullets = [];
   let titleFound = false;
 
@@ -686,9 +697,11 @@ function parseFreeformListing(text) {
     // Strip Khmer duplicate text first, then any leading bullet/emoji marker
     // (⁃, -, ➡️, ✅, etc.) — our own template adds its own ✅ icon on assembly,
     // so a leftover source marker would just double up visually.
-    const line = stripLeadingSymbols(stripKhmerDuplicateText(rawLine));
+    const line = stripLeadingSymbols(stripKhmerDuplicateText(rawLine)).replace(/🔥/g, '').replace(/\s{2,}/g, ' ').trim();
     if (!line) return;
-    if (contactLineRegex.test(line)) return; // never carry over another agent's contact info
+    if (contactLineRegex.test(rawLine) || contactLineRegex.test(line)) return; // never carry over another agent's contact info (checked before the leading 📞 is stripped)
+    if (sectionHeadingRegex.test(line.replace(/[:：\s]+$/, ''))) return;
+    if (/^\s*📍/.test(rawLine) && !location) { location = line; return; } // the post's own area line
 
     if (/\b(price|rental|rent)\b/i.test(line) && /[\d,]+/.test(line)) {
       const amt = line.match(/[\d,]+/);
@@ -703,7 +716,7 @@ function parseFreeformListing(text) {
     bullets.push({ icon: '✅', text: line });
   });
 
-  return { forSale, forRent, title, location: '', bullets, sourceLang: 'en' };
+  return { forSale, forRent, title, location, bullets, sourceLang: 'en' };
 }
 
 // ── Bullet bucketing — one unified structure for every listing type ────
@@ -2054,12 +2067,12 @@ function dryRunIntake(payload) {
 function fetchUnitProjects() {
   const cached = unitCache().get('unitprojects');
   if (cached) return JSON.parse(cached);
-  const resp = UrlFetchApp.fetch(SUPABASE_REST_URL + '/properties?select=id,title&parent_property_id=is.null&order=title.asc', {
+  const resp = UrlFetchApp.fetch(SUPABASE_REST_URL + '/properties?select=id,title,location,city&parent_property_id=is.null&order=title.asc', {
     headers: { apikey: SUPABASE_PUBLISHABLE_KEY, Authorization: 'Bearer ' + SUPABASE_PUBLISHABLE_KEY },
     muteHttpExceptions: true,
   });
   if (resp.getResponseCode() !== 200) return [];
-  const list = JSON.parse(resp.getContentText()).map(function (r) { return { id: r.id, title: r.title }; });
+  const list = JSON.parse(resp.getContentText()).map(function (r) { return { id: r.id, title: r.title, location: r.location || '', city: r.city || '' }; });
   unitCache().put('unitprojects', JSON.stringify(list), 3600);
   return list;
 }
