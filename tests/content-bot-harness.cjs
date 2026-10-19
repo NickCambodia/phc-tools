@@ -1566,7 +1566,7 @@ test('BEDBATH: the old and the new way of writing it are both read; other lines 
   assert.strictEqual(P('47 sqm Gross | 38 sqm Net'), null);
   assert.strictEqual(P(''), null);
 });
-const asm = (env, text, lang) => run(env, `fromBoldSansSerif(assembleListing(parseListingText(${JSON.stringify(text)}), '${lang}'))`);
+const asm = (env, text, lang) => { run(env, 'COMPACT_LISTING_LAYOUT = true'); return run(env, `fromBoldSansSerif(assembleListing(parseListingText(${JSON.stringify(text)}), '${lang}'))`); };
 const sourcePost = '#ForSale $35,000\n\nRESIDENCE L | 1BR UNIT\n📍 BKK1, Phnom Penh\n\n――――――――――\n\nUNIT DETAILS\n✅ Unit G10-09 | 9th Floor\n✅ 1 Bedroom | 1 Bathroom\n✅ 47㎡ Gross | 38㎡ Net\n✅ Strata Title\n✅ Fully Furnished\n\nFACILITIES\n✅ Swimming Pool & Gym\n✅ Coffee Shop\n✅ Convenience Store\n✅ Laundry Room\n\n📞 011 666 952';
 test('COMPACT: a single unit becomes price, place, one facts line, features', () => {
   const env = makeEnv();
@@ -1595,6 +1595,11 @@ test('COMPACT: a studio, a ground floor, 1.5 baths, a rental and utilities', () 
   assert.ok(/^#ForRent \$650\/month\n\n📍 Sky Villa, Tonle Bassac\n\nGround floor \| 📐 38 sqm \| Studio \| 1🛁\n\nFeatures:\n✅ Fully Furnished\n\nUtilities:\n💧 Water \$0\.5 per m3\n⚡ Electricity \$0\.25 per kWh\n\n/.test(out), out);
   assert.ok(/2🛏 \| 1\.5🛁/.test(asm(env, sourcePost.replace('1 Bedroom | 1 Bathroom', '2 Beds | 1.5 Baths'), 'EN')));
 });
+test('COMPACT: it is OFF by default, so posts keep the previous layout until you accept a style', () => {
+  const env = makeEnv();
+  const out = run(env, `fromBoldSansSerif(assembleListing(parseListingText(${JSON.stringify(sourcePost)}), 'EN'))`);
+  assert.ok(/UNIT DETAILS\n🛏 1 Bed \| 🛁 1 Bath\n/.test(out) && !/Features:/.test(out) && /G10-09/.test(out), out);
+});
 test('COMPACT: not used for a promotion or a post without bedrooms and bathrooms, which keep the old layout', () => {
   const env = makeEnv();
   const promo = '#ForSale $99,000\n\nTIME SQUARE 7 | NEW LAYOUT\n📍 Toul Kork, Phnom Penh\n\nPROMOTION\n✅ 1 Bedroom Duplex\n✅ 65㎡ Gross Area\n✅ Up to 35-Month Installment';
@@ -1610,6 +1615,7 @@ test('COMPACT: your old and new bed and bath wording both give the same compact 
 });
 test('COMPACT: a post forwarded from your own channel is rebuilt the same way, other forwards keep the whole text path', () => {
   const env = makeEnv();
+  run(env, 'COMPACT_LISTING_LAYOUT = true');
   env.ctx.__post = '#ForSale $35,000\n\n𝗥𝗘𝗦𝗜𝗗𝗘𝗡𝗖𝗘 𝗟 | 𝟭𝗕𝗥 𝗨𝗡𝗜𝗧\n📍 Boeung Tumpun, Phnom Penh\n\nUNIT DETAILS\n✅ Unit G10-09 | 9th Floor\n✅ 1 Bedroom | 1 Bathroom\n✅ 47㎡ Gross | 38㎡ Net\n\n📞 096 96 61 555\n🏠 t.me/NickREAKH';
   run(env, `processChannelListing('${CHAT}', __post, ['F1'], true, 'NickREAKH', null)`);
   const H = JSON.parse(run(env, 'JSON.stringify(HEADERS)'));

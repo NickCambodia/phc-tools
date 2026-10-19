@@ -334,7 +334,7 @@ function processChannelListing(chatId, text, photoFileIds, isForwarded, sourceUs
   let ownAsUnit = false; // a forward from your channel that is a single unit is rebuilt in the compact layout like any other listing
   if (isFromOwnChannel) {
     const tried = parseListingText(text);
-    ownAsUnit = !!((tried.forSale || tried.forRent) && tried.bullets.some(function (b) { return b.icon === '✅' && parseBedBathText(b.text); }));
+    ownAsUnit = COMPACT_LISTING_LAYOUT && !!((tried.forSale || tried.forRent) && tried.bullets.some(function (b) { return b.icon === '✅' && parseBedBathText(b.text); }));
     fields = ownAsUnit ? tried : null;
     assembleFn = ownAsUnit ? assembleListing : null; // otherwise handled directly below via translateWholeText
   } else {
@@ -901,7 +901,7 @@ function assembleListing(fields, lang) {
     if (bb) bedbath = bb; else restBullets.push(b);
   });
   // A single unit for sale or rent with its bedrooms and bathrooms known uses the compact layout (see assembleCompactListing).
-  if ((fields.forSale || fields.forRent) && bedbath) return assembleCompactListing(fields, lang, restBullets, bedbath, titleEn, locationEn, toLang);
+  if (COMPACT_LISTING_LAYOUT && (fields.forSale || fields.forRent) && bedbath) return assembleCompactListing(fields, lang, restBullets, bedbath, titleEn, locationEn, toLang);
   const sections = bucketListing(restBullets); // classify on EN text — consistent structure across all languages
 
   // Project/place names are proper nouns — never machine-translate them, or
@@ -941,6 +941,8 @@ function assembleListing(fields, lang) {
 //   (🔗 page link is added just above the contact block when the page is live)
 // Facts are one line, features are the selling points. The building's facility list belongs on the website, so only the first
 // FOLD_FACILITIES facilities are folded into the features (set to 0 to leave them out completely). The unit number is never shown.
+// The compact layout is OFF until Nick accepts a style. Off means every post keeps the layout it had before (bed and bath emoji line first).
+let COMPACT_LISTING_LAYOUT = false;
 const FOLD_FACILITIES = 2;
 const COMPACT_TEXT = {
   EN: { floor: function (n) { return 'Floor ' + n; }, ground: 'Ground floor', sqm: 'sqm', studio: 'Studio', features: 'Features:', utilities: 'Utilities:', net: function (n) { return 'Net area ' + n + ' sqm'; } },
