@@ -1476,5 +1476,64 @@ test('DUPLICATE: a twin that is already sold is described as a possible relistin
   assert.ok(/\(sold\)/.test(t) && /no longer live/.test(t) && !/price reduced to/.test(t), t);
 });
 
+// ---------- translation keeps names
+// A fake translator that behaves like the real one did: it turns BKK into Bangkok unless the word is marked translate="no".
+const fakeTranslator = (honourNoTranslate) => `LanguageApp.translate = function (t, f, to, opts) {
+  __seen.push({ t: t, opts: opts || null });
+  const bangkok = { ja: 'バンコク', ru: 'Бангкок', de: 'Bangkok' }[to] || 'Bangkok';
+  let out = t;
+  const keep = [];
+  if (${honourNoTranslate}) { out = out.replace(/<span translate="no">(.*?)<\\/span>/g, function (m, g1) { keep.push(g1); return '@@' + (keep.length - 1) + '@@'; }); }
+  out = out.replace(/\\bBKK([1-3]?)\\b/g, bangkok + '$1').replace(/Time Square/g, 'タイムスクエア').replace(/Located in/g, to === 'ja' ? '所在地' : 'In');
+  if (${honourNoTranslate}) out = out.replace(/@@(\\d+)@@/g, function (m, i) { return '<span translate="no">' + keep[+i] + '</span>'; });
+  return out;
+}`;
+test('NAMES: BKK1 is kept as BKK1 when the translator honours the do-not-translate mark', () => {
+  const env = makeEnv();
+  run(env, `__seen = []`); run(env, fakeTranslator(true));
+  const r = run(env, `translateField('Located in BKK1, near Time Square 10', 'en', 'JP')`);
+  assert.strictEqual(r, '所在地 BKK1, near Time Square 10');
+  assert.strictEqual(JSON.parse(run(env, 'JSON.stringify(__seen[0].opts)')).contentType, 'html');
+  assert.ok(!/<span/.test(r));
+});
+test('NAMES: if the translator ignores the mark and still says Bangkok, BKK is put back', () => {
+  const env = makeEnv();
+  run(env, `__seen = []`); run(env, fakeTranslator(false));
+  assert.strictEqual(run(env, `translateField('Located in BKK3', 'en', 'JP')`), '所在地 BKK3'.replace('BKK3', 'BKK3'));
+  assert.strictEqual(run(env, `translateField('Located in BKK', 'en', 'RU')`), 'In BKK');
+  assert.strictEqual(run(env, `translateField('Located in BKK2', 'en', 'DE')`), 'In BKK2');
+});
+test('NAMES: a real mention of Bangkok is left alone, and text without names uses the plain translator', () => {
+  const env = makeEnv();
+  run(env, `__seen = []`); run(env, fakeTranslator(true));
+  run(env, `LanguageApp.translate = function (t, f, to, opts) { __seen.push({ t: t, opts: opts || null }); return '[' + to + '] ' + t.replace('Bangkok', 'バンコク'); }`);
+  assert.strictEqual(run(env, `translateField('Flights to Bangkok daily', 'en', 'JP')`), '[ja] Flights to バンコク daily');
+  assert.strictEqual(run(env, `__seen[0].opts`), null);
+  // when BKK is present and the text never says Bangkok, any Bangkok in the result is the old mistake; a text that says both is left to the marks
+  assert.ok(/BKK/.test(run(env, `translateField('Flights from BKK to Bangkok', 'en', 'JP')`)));
+});
+test('NAMES: an ALL CAPS line with BKK1 keeps BKK1 in capitals', () => {
+  const env = makeEnv();
+  run(env, `__seen = []`); run(env, fakeTranslator(true));
+  assert.strictEqual(run(env, `translateField('LOCATED IN BKK1', 'en', 'JP')`), 'LOCATED IN BKK1');
+});
+test('NAMES: ampersands and angle signs in the text survive the marked round trip', () => {
+  const env = makeEnv();
+  run(env, `__seen = []`); run(env, fakeTranslator(true));
+  const r = run(env, `translateField('Pool & Gym in BKK1 <new>', 'en', 'DE')`);
+  assert.strictEqual(r, 'Pool & Gym in BKK1 <new>');
+});
+test('NAMES: if the html mode is refused, the plain text translation is used and BKK is still restored', () => {
+  const env = makeEnv();
+  run(env, `LanguageApp.translate = function (t, f, to, opts) { if (opts) throw new Error('html not supported'); return t.replace(/BKK1/g, 'バンコク1'); }`);
+  assert.strictEqual(run(env, `translateField('Located in BKK1', 'en', 'JP')`), 'Located in BKK1');
+});
+test('NAMES: a whole post forwarded from your own channel keeps BKK1 in JP', () => {
+  const env = makeEnv();
+  run(env, `__seen = []`); run(env, fakeTranslator(true));
+  const out = run(env, `translateWholeText('#ForSale $35,000\\n📍 BKK1, Phnom Penh\\n✅ Located in BKK1', 'JP')`);
+  assert.ok(!/バンコク/.test(out) && /BKK1, Phnom Penh/.test(out), out);
+});
+
 console.log(failures ? `\n${failures} FAILED` : '\nALL PASSED');
 process.exit(failures ? 1 : 0);

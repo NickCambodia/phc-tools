@@ -726,6 +726,44 @@ function bucketListing(bullets) {
 
 // ── Final assembly — translate + apply the unified template shape ──────
 
+// Words the translator must never change: Google reads "BKK1" as Bangkok airport, and turns project names into katakana or Cyrillic.
+// BKK1, BKK2, BKK3 (Boeung Keng Kang) and PHC's own project names are kept exactly as written, in every language.
+const PROTECTED_NAMES = [
+  'Time Square', 'Odom Living', 'Odom Tower', 'GATO Tower', 'Picasso Sky Gemme', 'Le Conde', 'Kingston Royale', 'Norea Square',
+  'Diamond Bay Garden', 'J Tower', 'LZ Sea View Premium', 'UC88 Wyndham Garden', 'Rose Apple Square', 'Angkor Grace', 'Residence L',
+  'Property Hub Cambodia', 'PHC',
+];
+const BANGKOK_FORMS = /(バンコク|Бангкок|Bangkok|曼谷)\s?([1-3])?/g;
+
+function protectedTermRegex() {
+  let names = PROTECTED_NAMES.slice();
+  try { // project names already on the website (cached for an hour by the unit intake), when they are at hand
+    const raw = CacheService.getScriptCache().get('unitprojects');
+    if (raw) JSON.parse(raw).forEach(function (p) { if (p && p.title && names.indexOf(p.title) === -1) names.push(p.title); });
+  } catch (e) { /* the built in list is enough */ }
+  const esc = function (t) { return t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); };
+  names.sort(function (a, b) { return b.length - a.length; }); // longest first, so "Time Square" is not cut short
+  return new RegExp('\\bBKK[1-3]?\\b|\\b(?:' + names.map(esc).join('|') + ')(?:\\s?\\d{1,2})?(?![A-Za-z0-9])', 'gi'); // any capitals: an ALL CAPS line is lowercased before it is translated
+}
+
+function escapeHtmlText(t) { return t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+function unescapeHtmlText(t) { return t.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&'); }
+
+// Sends the text with the protected words marked "do not translate", then removes the marks again.
+// Safety net: if the translator still turned BKK into Bangkok, the original BKK is put back.
+function translateKeepingNames(text, sourceLang, targetCode) {
+  const re = protectedTermRegex();
+  if (!re.test(text)) return LanguageApp.translate(text, sourceLang, targetCode);
+  re.lastIndex = 0;
+  const marked = escapeHtmlText(text).replace(new RegExp(re.source.replace(/&/g, '&amp;'), 'gi'), function (m) { return '<span translate="no">' + m + '</span>'; });
+  let out;
+  try { out = unescapeHtmlText(LanguageApp.translate(marked, sourceLang, targetCode, { contentType: 'html' }).replace(/<\/?span[^>]*>/gi, '')); }
+  catch (e) { out = LanguageApp.translate(text, sourceLang, targetCode); } // html mode refused: plain text, the safety net below still applies
+  const bkk = text.match(/\bBKK[1-3]?\b/i);
+  if (bkk && !/bangkok/i.test(text)) out = out.replace(BANGKOK_FORMS, function (m, w, d) { return 'BKK' + (d || ''); });
+  return out;
+}
+
 function translateField(text, sourceLang, lang) {
   if (!text) return text;
   const targetCode = { EN: 'en', JP: 'ja', RU: 'ru', DE: 'de' }[lang];
@@ -744,7 +782,7 @@ function translateField(text, sourceLang, lang) {
     const cache = toTranslate.length <= 120 ? CacheService.getScriptCache() : null;
     let translated = cache ? cache.get(cacheKey) : null;
     if (translated === null || translated === undefined) {
-      translated = LanguageApp.translate(toTranslate, sourceLang, targetCode);
+      translated = translateKeepingNames(toTranslate, sourceLang, targetCode);
       if (cache && translated) { try { cache.put(cacheKey, translated, 21600); } catch (e) { /* a full cache only costs speed */ } }
     }
     return isAllCaps ? translated.toUpperCase() : translated;
