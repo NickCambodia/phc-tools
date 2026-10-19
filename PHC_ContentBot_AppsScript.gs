@@ -331,9 +331,12 @@ function processChannelListing(chatId, text, photoFileIds, isForwarded, sourceUs
   const isFromOwnChannel = sourceUsername && sourceUsername.toLowerCase() === OWN_CHANNEL_USERNAME.toLowerCase();
 
   let fields, assembleFn;
+  let ownAsUnit = false; // a forward from your channel that is a single unit is rebuilt in the compact layout like any other listing
   if (isFromOwnChannel) {
-    fields = null;
-    assembleFn = null; // handled directly below via translateWholeText
+    const tried = parseListingText(text);
+    ownAsUnit = !!((tried.forSale || tried.forRent) && tried.bullets.some(function (b) { return b.icon === '✅' && parseBedBathText(b.text); }));
+    fields = ownAsUnit ? tried : null;
+    assembleFn = ownAsUnit ? assembleListing : null; // otherwise handled directly below via translateWholeText
   } else {
     // Three source formats supported for everything else: our own
     // #ForSale/#ForRent/#NewProject template (e.g. output from the ChatGPT
@@ -405,14 +408,14 @@ function processChannelListing(chatId, text, photoFileIds, isForwarded, sourceUs
   // phone/Telegram) — strip it so CONTACT_STANDARD (PHC's own number/channel)
   // is what every post shows, same as every other source path. Text is
   // therefore always rebuilt now, never sent byte-for-byte untouched.
-  const ownChannelBody = isFromOwnChannel ? stripTrailingContactBlock(text) + '\n\n――――――――――\n' + CONTACT_STANDARD : '';
+  const ownChannelBody = isFromOwnChannel && !ownAsUnit ? stripTrailingContactBlock(text) + '\n\n――――――――――\n' + CONTACT_STANDARD : '';
 
   // The review message needs only the English text, so it goes out as soon as the EN row is ready. JP, RU and DE are translated
   // after that, while you are reading it. Approve All is handled only after this run finishes, so the rows are always complete.
   let reviewMsg = null;
   ['EN', 'JP', 'RU', 'DE'].forEach(lang => {
     let content;
-    if (isFromOwnChannel) {
+    if (isFromOwnChannel && !ownAsUnit) {
       // JP/RU/DE: whole-block translate — this content isn't guaranteed to
       // match the single-listing bullet schema, so there's nothing to
       // structurally parse; translate the full text as one unit. CONTACT_STANDARD
@@ -486,6 +489,7 @@ function parseListingText(text) {
   const bullets = []; // { icon, text }
   let seenBullet = false;
   const bulletIcons = ['✅', '💧', '⚡', '🚗', '💼'];
+  let section = ''; // the last heading seen (UNIT DETAILS, FEATURES, FACILITIES ...)
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
@@ -506,18 +510,18 @@ function parseListingText(text) {
 
     if (line.startsWith('📍')) { location = line.replace('📍', '').trim(); continue; }
     if (/^[―\-_=]{3,}$/.test(line)) continue; // divider
-    if (/^[A-Z\s]{3,}$/.test(plain) && !bulletIcons.some(ic => line.startsWith(ic))) continue; // skip section labels (UNIT DETAILS, FEATURES, etc.)
+    if (/^[A-Z\s]{3,}$/.test(plain) && !bulletIcons.some(ic => line.startsWith(ic))) { section = plain.trim(); continue; } // section labels (UNIT DETAILS, FEATURES, etc.)
     if (line.startsWith('📞')) break; // contact block — stop parsing, we use our own contact info
 
     if (/^[\u{1F6CF}\u{1F6C1}]/u.test(line)) { // "🛏 1 Bed | 🛁 1 Bath": read like a ✅ detail, the bed and bath line is rebuilt later
       seenBullet = true;
-      bullets.push({ icon: '✅', text: line.replace(/^[\u{1F6CF}\u{1F6C1}\uFE0F\s]+/u, '').trim() });
+      bullets.push({ icon: '✅', text: line.replace(/^[\u{1F6CF}\u{1F6C1}\uFE0F\s]+/u, '').trim(), section });
       continue;
     }
     const icon = bulletIcons.find(ic => line.startsWith(ic));
     if (icon) {
       seenBullet = true;
-      bullets.push({ icon, text: line.slice(icon.length).trim() });
+      bullets.push({ icon, text: line.slice(icon.length).trim(), section });
       continue;
     }
     if (line.includes('|') && !title && !seenBullet) { title = line; continue; }
@@ -887,7 +891,7 @@ function assembleListing(fields, lang) {
 
   const titleEn = fields.sourceLang === 'zh' ? toEn(fields.title) : fields.title; // project names in our own template stay as-is
   const locationEn = fields.location ? toEn(fields.location) : '';
-  const bulletsEn = fields.bullets.map(b => ({ icon: b.icon, text: toEn(b.text) }));
+  const bulletsEn = fields.bullets.map(b => ({ icon: b.icon, text: toEn(b.text), section: b.section || '' }));
 
   // The bedroom and bathroom line is taken out here and put back first in UNIT DETAILS, built from the table (see formatBedBath).
   let bedbath = null;
@@ -896,6 +900,8 @@ function assembleListing(fields, lang) {
     const bb = b.icon === '✅' && !bedbath ? parseBedBathText(b.text) : null;
     if (bb) bedbath = bb; else restBullets.push(b);
   });
+  // A single unit for sale or rent with its bedrooms and bathrooms known uses the compact layout (see assembleCompactListing).
+  if ((fields.forSale || fields.forRent) && bedbath) return assembleCompactListing(fields, lang, restBullets, bedbath, titleEn, locationEn, toLang);
   const sections = bucketListing(restBullets); // classify on EN text — consistent structure across all languages
 
   // Project/place names are proper nouns — never machine-translate them, or
@@ -918,6 +924,88 @@ function assembleListing(fields, lang) {
     if (!items.length) return;
     body += toBoldSansSerif(header) + '\n' + items.map(b => b.plain ? b.text : b.icon + ' ' + b.text).join('\n') + '\n\n';
   });
+  body += '――――――――――\n' + CONTACT_STANDARD;
+  return body;
+}
+
+// ── The compact layout for a single unit ────────────────────────────────────────────
+//   #ForSale $35,000
+//
+//   📍 Residence L, Boeung Tumpun
+//
+//   Floor 9 | 📐 47 sqm | 1🛏 | 1🛁
+//
+//   Features:
+//   ✅ ...
+//
+//   (🔗 page link is added just above the contact block when the page is live)
+// Facts are one line, features are the selling points. The building's facility list belongs on the website, so only the first
+// FOLD_FACILITIES facilities are folded into the features (set to 0 to leave them out completely). The unit number is never shown.
+const FOLD_FACILITIES = 2;
+const COMPACT_TEXT = {
+  EN: { floor: function (n) { return 'Floor ' + n; }, ground: 'Ground floor', sqm: 'sqm', studio: 'Studio', features: 'Features:', utilities: 'Utilities:', net: function (n) { return 'Net area ' + n + ' sqm'; } },
+  JP: { floor: function (n) { return n + '階'; }, ground: 'グラウンドフロア', sqm: '㎡', studio: 'スタジオ', features: '特徴:', utilities: '光熱費:', net: function (n) { return '専有面積 ' + n + '㎡'; } },
+  RU: { floor: function (n) { return n + ' этаж'; }, ground: 'Первый этаж', sqm: 'м²', studio: 'Студия', features: 'Особенности:', utilities: 'Коммунальные услуги:', net: function (n) { return 'Чистая площадь ' + n + ' м²'; } },
+  DE: { floor: function (n) { return n + '. Etage'; }, ground: 'Erdgeschoss', sqm: 'm²', studio: 'Studio', features: 'Ausstattung:', utilities: 'Nebenkosten:', net: function (n) { return 'Nettofläche ' + n + ' m²'; } },
+};
+const FLOOR_SEGMENT_RE = /^(?:([0-9]{1,3})(?:st|nd|rd|th)?\s*floor|floor\s*[:#]?\s*([0-9]{1,3}|G))$/i;
+const SIZE_SEGMENT_RE = /^([0-9]+(?:[.,][0-9]+)?)\s*(?:㎡|m²|m2|sqm|sq\.?\s?m)\s*(gross|net)?(?:\s*(?:area|size))?$/i;
+const UNITNO_SEGMENT_RE = /^unit\s*(?:no\.?|number|#)?\s*[:#-]?\s*[A-Za-z0-9][A-Za-z0-9\-]{0,11}$/i;
+
+function assembleCompactListing(fields, lang, bullets, bedbath, titleEn, locationEn, toLang) {
+  const T = COMPACT_TEXT[lang] || COMPACT_TEXT.EN;
+  let floor = null, gross = null, net = null, plainSize = null;
+  const features = [], facilities = [], utilities = [];
+  const seen = {};
+  const addTo = function (list, text) {
+    const k = String(text).toLowerCase();
+    if (text && !seen[k]) { seen[k] = true; list.push(text); }
+  };
+
+  bullets.forEach(function (b) {
+    if (b.icon !== '✅') { utilities.push(b); return; }
+    const left = [];
+    String(b.text).split('|').map(function (x) { return x.trim(); }).filter(Boolean).forEach(function (seg) {
+      let m;
+      if ((m = seg.match(FLOOR_SEGMENT_RE))) { if (floor === null) floor = String(m[1] || m[2]).toUpperCase(); return; }
+      if ((m = seg.match(SIZE_SEGMENT_RE))) {
+        const v = m[1].replace(',', '.'), kind = (m[2] || '').toLowerCase();
+        if (kind === 'net') net = net || v; else if (kind === 'gross') gross = gross || v; else plainSize = plainSize || v;
+        return;
+      }
+      if (UNITNO_SEGMENT_RE.test(seg) && /\d/.test(seg)) return; // the unit number stays private
+      left.push(seg);
+    });
+    if (!left.length) return;
+    (/^(FACILITIES|AMENITIES)$/i.test(b.section || '') ? facilities : features).push(left.join(' | '));
+  });
+
+  const size = gross || plainSize || net;
+  const featureLines = [];
+  features.forEach(function (f) { addTo(featureLines, toLang(f)); });
+  if (net && size !== net) addTo(featureLines, T.net(net));
+  facilities.slice(0, FOLD_FACILITIES).forEach(function (f) { addTo(featureLines, toLang(f)); });
+
+  const facts = [];
+  if (floor !== null) facts.push(floor === 'G' ? T.ground : T.floor(floor));
+  if (size) facts.push('📐 ' + size + ' ' + T.sqm);
+  if (bedbath.beds !== null && bedbath.beds !== undefined) facts.push(bedbath.beds === 0 ? T.studio : bedbath.beds + '🛏');
+  if (bedbath.baths !== null && bedbath.baths !== undefined) facts.push(bedbath.baths + '🛁');
+
+  // "RESIDENCE L | 1BR UNIT" and "Boeung Tumpun, Phnom Penh" become "Residence L, Boeung Tumpun". Project and place names are never translated.
+  const building = titleCaseBuilding(fromBoldSansSerif(String(titleEn || '')).split('|')[0]); // titles arrive in bold letters
+  const areaParts = String(locationEn || '').split(',').map(function (x) { return x.trim(); }).filter(Boolean);
+  if (areaParts.length && /^phnom penh$/i.test(areaParts[areaParts.length - 1])) areaParts.pop();
+  const where = [building].concat(areaParts).filter(Boolean).join(', ');
+
+  let priceLine = '';
+  if (fields.forSale) priceLine += '#ForSale ' + fields.forSale + '\n';
+  if (fields.forRent) priceLine += '#ForRent ' + fields.forRent + '\n';
+  let body = priceLine.trim() + '\n\n';
+  if (where) body += '📍 ' + where + '\n\n';
+  if (facts.length) body += facts.join(' | ') + '\n\n';
+  if (featureLines.length) body += T.features + '\n' + featureLines.map(function (f) { return '✅ ' + f; }).join('\n') + '\n\n';
+  if (utilities.length) body += T.utilities + '\n' + utilities.map(function (u) { return u.icon + ' ' + toLang(u.text); }).join('\n') + '\n\n';
   body += '――――――――――\n' + CONTACT_STANDARD;
   return body;
 }
@@ -1219,6 +1307,17 @@ function looksLikeStatusKeyword(text) {
   return !!STATUS_LABELS[upper] || /^REDUCED\b/.test(upper);
 }
 
+// Which website unit a channel post belongs to: the number at the end of its page address (or the older "Ref TS10-1021" line).
+function unitFromPost(content) {
+  const s = String(content || '');
+  const r = s.match(/\bRef\s+([A-Za-z][A-Za-z0-9]{0,5}-(\d{4,6}))\b/);
+  if (r) return { ref: r[1], id: parseInt(r[2], 10) - 1000 };
+  const u = s.match(/propertyhubcambodia\.com\/property\/([a-z0-9-]+)/i);
+  const n = u ? u[1].match(/-(\d{4,6})$/) : null;
+  if (n) return { ref: null, id: parseInt(n[1], 10) - 1000 };
+  return null;
+}
+
 function handleStatusReply(chatId, text, replyToMessageId) {
   const upper = text.trim().toUpperCase();
   let banner;
@@ -1251,15 +1350,15 @@ function handleStatusReply(chatId, text, replyToMessageId) {
   // website price change (a card with buttons, nothing changes until you tap).
   let websiteChange = null;
   if (!STATUS_LABELS[upper]) {
-    const ref = String(sheet.getRange(matchingRows[0], contentIdx + 1).getValue() || '').match(/\bRef\s+([A-Za-z][A-Za-z0-9]{0,5}-(\d{4,6}))\b/);
+    const ref = unitFromPost(sheet.getRange(matchingRows[0], contentIdx + 1).getValue());
     const amount = text.match(/\$\s*(\d[\d,]*(?:\.\d+)?)\s*([km])?(?![a-z0-9])/i);
-    if (ref && amount) websiteChange = { id: parseInt(ref[2], 10) - 1000, ref: ref[1], newPrice: parseMoneyAmount(amount[1], amount[2]) };
+    if (ref && amount) websiteChange = { id: ref.id, ref: ref.ref, newPrice: parseMoneyAmount(amount[1], amount[2]) };
   }
 
   // The same post's Ref decides what else a reply can do. No Ref means a channel only post with no page on the website.
-  const postRef = String(sheet.getRange(matchingRows[0], contentIdx + 1).getValue() || '').match(/\bRef\s+([A-Za-z][A-Za-z0-9]{0,5}-(\d{4,6}))\b/);
+  const postRef = unitFromPost(sheet.getRange(matchingRows[0], contentIdx + 1).getValue());
   let soldChange = null;
-  if ((upper === 'SOLD' || upper === 'RENTED') && postRef) soldChange = { verb: upper.toLowerCase(), id: parseInt(postRef[2], 10) - 1000, ref: postRef[1] };
+  if ((upper === 'SOLD' || upper === 'RENTED') && postRef) soldChange = { verb: upper.toLowerCase(), id: postRef.id, ref: postRef.ref };
   let pageOffer = null; // a channel only post that could become a website page
   if (!postRef && !STATUS_LABELS[upper]) {
     const enRow = matchingRows.filter(function (r) { return sheet.getRange(r, langIdx + 1).getValue() === 'EN'; })[0] || matchingRows[0];
@@ -2007,7 +2106,9 @@ function addUnitFeature(out, text) {
 // Returns true when the piece was a structured fact; false means it is a plain feature.
 function applyDetailSegment(seg, out) {
   let m;
-  seg = String(seg).replace(/^[\u{1F6CF}\u{1F6C1}\uFE0F\s]+/u, '');
+  seg = String(seg).replace(/^[\u{1F6CF}\u{1F6C1}\u{1F4D0}\uFE0F\s]+/u, '');
+  if ((m = seg.match(/^([0-9]+)\s*\u{1F6CF}\uFE0F?$/u))) { out.bedrooms = parseInt(m[1], 10); return true; } // "2🛏" in the compact line
+  if ((m = seg.match(/^([0-9]+(?:[.,][0-9]+)?)\s*\u{1F6C1}\uFE0F?$/u))) { out.bathrooms = parseFloat(m[1].replace(',', '.')); return true; }
   if ((m = seg.match(/^unit\s*(?:no\.?|number|#)?\s*[:#-]?\s*([A-Za-z0-9][A-Za-z0-9\-]{0,11})$/i)) && /\d/.test(m[1])) { out.unitNumber = m[1].toUpperCase(); return true; }
   if ((m = seg.match(/^(?:([0-9]{1,3})(?:st|nd|rd|th)?\s*floor|floor\s*[:#]?\s*([0-9]{1,3}|G))$/i))) { out.floor = String(m[1] || m[2]).toUpperCase(); return true; }
   if (/^studio$/i.test(seg)) { out.bedrooms = 0; return true; }
@@ -2103,6 +2204,7 @@ function parseTelegramPost(text) {
   let section = '';
   let titleText = '';
   let titleDone = false;
+  let compactFacts = false;
   let bulletCount = 0;
 
   lines.forEach(function (line) {
@@ -2146,6 +2248,18 @@ function parseTelegramPost(text) {
       return;
     }
 
+    // The compact facts line, "Floor 9 | 📐 47 sqm | 1🛏 | 1🛁": every part must be a fact we understand.
+    if (line.indexOf('|') !== -1) {
+      const segs = line.split('|').map(function (x) { return x.trim(); }).filter(Boolean);
+      const probe = { bedrooms: null, bathrooms: null, floor: null, grossSqm: null, netSqm: null, sqm: null, unitNumber: null, usedSqft: false };
+      if (segs.length >= 2 && segs.every(function (x) { return applyDetailSegment(x, probe); })) {
+        segs.forEach(function (x) { applyDetailSegment(x, out); });
+        out.found = true;
+        compactFacts = true;
+        return;
+      }
+    }
+
     // The title line, "BUILDING | 1BR UNIT": only trusted when it has a "|".
     if (!titleDone && line.indexOf('|') !== -1) {
       titleDone = true;
@@ -2162,6 +2276,12 @@ function parseTelegramPost(text) {
     }
   });
 
+  // Compact layout: the first part of the "📍" line is the building ("Residence L, Boeung Tumpun").
+  if (compactFacts && !titleDone && out.locationText) {
+    const parts = out.locationText.split(',').map(function (x) { return x.trim(); }).filter(Boolean);
+    out.buildingName = titleCaseBuilding(parts[0]);
+    out.locationText = parts.slice(1).join(', ') || null;
+  }
   out.sqm = out.grossSqm !== null ? out.grossSqm : (out.sqm !== null ? out.sqm : out.netSqm);
   if (out.grossSqm !== null && out.netSqm !== null) addUnitFeature(out, 'Net area ' + out.netSqm + ' sqm');
   out.propertyType = guessUnitType(titleText);
@@ -2878,12 +2998,13 @@ function parsePriceUpdate(text) {
 function startPriceUpdate(chatId, pu) {
   chatId = String(chatId);
   if (!pu.newPrice) {
-    sendTelegramMessage(chatId, 'I found ' + pu.ref + ' but not the new price.\nExample: ' + pu.ref + ' price reduced to $58,500');
+    const label = pu.ref || ('number ' + (pu.id + 1000));
+    sendTelegramMessage(chatId, 'I found ' + label + ' but not the new price.\nExample: ' + (pu.ref || 'TS10-' + (pu.id + 1000)) + ' price reduced to $58,500');
     return;
   }
   const r = callIntake({ action: 'lookup', id: pu.id });
   if (r.code === 404) {
-    sendTelegramMessage(chatId, 'I could not find a single unit with the number ' + pu.ref + '. Project pages are never changed this way.');
+    sendTelegramMessage(chatId, 'I could not find a single unit with the number ' + (pu.ref || (pu.id + 1000)) + '. Project pages are never changed this way.');
     return;
   }
   if (r.code !== 200 || !r.body || !r.body.ok) {
@@ -3018,7 +3139,7 @@ function parseUnitStatusText(text) {
 function startUnitStatus(chatId, sc) {
   chatId = String(chatId);
   const r = callIntake({ action: 'lookup', id: sc.id });
-  if (r.code === 404) { sendTelegramMessage(chatId, 'I could not find a single unit with the number ' + sc.ref + '. Project pages are never changed this way.'); return; }
+  if (r.code === 404) { sendTelegramMessage(chatId, 'I could not find a single unit with the number ' + (sc.ref || (sc.id + 1000)) + '. Project pages are never changed this way.'); return; }
   if (r.code !== 200 || !r.body || !r.body.ok) { sendTelegramMessage(chatId, 'The website did not answer (' + r.code + '). Nothing was changed. Try again in a minute.'); return; }
   const u = r.body;
   const word = sc.verb === 'rented' ? 'Rented' : 'Sold';
@@ -3097,7 +3218,7 @@ function priceDropChannelText(st) {
 function addPageLink(content, pageUrl, refCode) {
   if (!pageUrl) return content;
   const marker = '――――――――――\n' + CONTACT_STANDARD;
-  const extra = '🔗 ' + pageUrl + (refCode ? '\n🏷 Ref ' + refCode : '');
+  const extra = '🔗 ' + pageUrl; // the unit's number is at the end of the address, so no separate code line is needed
   const at = content.lastIndexOf(marker);
   if (at === -1) return content + '\n\n' + extra;
   return content.slice(0, at) + extra + '\n\n' + content.slice(at);

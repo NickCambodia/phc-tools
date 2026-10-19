@@ -778,11 +778,11 @@ test('Both with a short caption: the channel post is built from the facts', () =
   assert.strictEqual(fields.forSale, '$185,000'); assert.ok(/GATO TOWER/.test(fields.title));
 });
 
-test('the live link and reference are placed just above the contact block', () => {
+test('the live link is placed just above the contact block, with no code line', () => {
   const env = makeEnv();
   const content = run(env, `'#ForSale $1\\n\\nTITLE\\n\\n――――――――――\\nUNIT DETAILS\\n✅ x\\n\\n――――――――――\\n' + CONTACT_STANDARD`);
   const out = run(env, `addPageLink(${JSON.stringify(content)}, 'https://www.propertyhubcambodia.com/property/x', 'GT-1019')`);
-  assert.ok(out.indexOf('🔗 https://www.propertyhubcambodia.com/property/x\n🏷 Ref GT-1019') < out.lastIndexOf('📞'));
+  assert.ok(out.indexOf('🔗 https://www.propertyhubcambodia.com/property/x') > -1 && out.indexOf('🔗') < out.lastIndexOf('📞') && !/🏷|Ref GT/.test(out));
   assert.ok(out.endsWith(run(env, `CONTACT_STANDARD`)));
   assert.strictEqual(run(env, `addPageLink('abc', '', null)`), 'abc');
 });
@@ -839,7 +839,7 @@ test('REGRESSION: Both puts the live link and the reference into every language 
   const rows = env.sheetData.slice(1);
   assert.strictEqual(rows.length, 4);
   rows.forEach((r) => {
-    assert.ok(/🔗 https:\/\/www\.propertyhubcambodia\.com\/property\/x-slug-1005\n🏷 Ref GT-1005/.test(r[3]), r[2] + ': ' + r[3]);
+    assert.ok(/🔗 https:\/\/www\.propertyhubcambodia\.com\/property\/x-slug-1005\n/.test(r[3]) && !/🏷|Ref GT/.test(r[3]), r[2] + ': ' + r[3]);
     assert.ok(r[3].indexOf('🔗') < r[3].lastIndexOf('📞'), 'link must sit above the contact block');
   });
 });
@@ -1566,24 +1566,80 @@ test('BEDBATH: the old and the new way of writing it are both read; other lines 
   assert.strictEqual(P('47 sqm Gross | 38 sqm Net'), null);
   assert.strictEqual(P(''), null);
 });
-const detailsOf = (env, text, lang) => {
-  const f = JSON.parse(run(env, `JSON.stringify(parseListingText(${JSON.stringify(text)}))`));
-  const out = run(env, `assembleListing(${JSON.stringify(f)}, '${lang}')`);
-  const plain = run(env, `fromBoldSansSerif(${JSON.stringify(out)})`);
-  return plain.split('UNIT DETAILS')[1].split('\n').filter(Boolean).slice(0, 4);
-};
-const sourcePost = '#ForSale $35,000\n\nRESIDENCE L | 1BR UNIT\n📍 BKK1, Phnom Penh\n\n――――――――――\n\nUNIT DETAILS\n✅ 9th Floor\n✅ 1 Bedroom | 1 Bathroom\n✅ 47 sqm Gross | 38 sqm Net\n\n📞 011 666 952';
-test('BEDBATH: first line of UNIT DETAILS in the English post, then floor and size', () => {
+const asm = (env, text, lang) => run(env, `fromBoldSansSerif(assembleListing(parseListingText(${JSON.stringify(text)}), '${lang}'))`);
+const sourcePost = '#ForSale $35,000\n\nRESIDENCE L | 1BR UNIT\n📍 BKK1, Phnom Penh\n\n――――――――――\n\nUNIT DETAILS\n✅ Unit G10-09 | 9th Floor\n✅ 1 Bedroom | 1 Bathroom\n✅ 47㎡ Gross | 38㎡ Net\n✅ Strata Title\n✅ Fully Furnished\n\nFACILITIES\n✅ Swimming Pool & Gym\n✅ Coffee Shop\n✅ Convenience Store\n✅ Laundry Room\n\n📞 011 666 952';
+test('COMPACT: a single unit becomes price, place, one facts line, features', () => {
   const env = makeEnv();
-  assert.deepStrictEqual(detailsOf(env, sourcePost, 'EN').slice(0, 3), ['🛏 1 Bed | 🛁 1 Bath', '✅ 9th Floor', '✅ 47 sqm Gross | 38 sqm Net']);
+  const out = asm(env, sourcePost, 'EN');
+  assert.strictEqual(out, [
+    '#ForSale $35,000', '', '📍 Residence L, BKK1', '', 'Floor 9 | 📐 47 sqm | 1🛏 | 1🛁', '', 'Features:',
+    '✅ Strata Title', '✅ Fully Furnished', '✅ Net area 38 sqm', '✅ Swimming Pool & Gym', '✅ Coffee Shop', '',
+    '――――――――――', '📞 011 666 952', '📱 t.me/PropertyHubCambodia'].join('\n'));
+  assert.ok(out.endsWith('📞 011 666 952\n📱 t.me/PropertyHubCambodia'));
+  assert.ok(!/G10-09/.test(out), 'the unit number is never shown');
+  assert.ok(!/Convenience|Laundry/.test(out), 'only the first two facilities are folded in');
+  assert.ok(!/UNIT DETAILS|FACILITIES|🏷/.test(out));
 });
-test('BEDBATH: the new emoji line written by you is read too, and not sent to the translator in JP', () => {
+test('COMPACT: the same unit in JP, RU and DE: floor and sizes in their words, icons unchanged, names kept', () => {
   const env = makeEnv();
-  run(env, `__n = []; LanguageApp.translate = function (t, f, to) { __n.push(t); return '[' + to + '] ' + t; }`);
-  const post = sourcePost.replace('✅ 1 Bedroom | 1 Bathroom', '🛏 1 Bed | 🛁 1 Bath');
-  const lines = detailsOf(env, post, 'JP');
-  assert.strictEqual(lines[0], '🛏 1ベッドルーム | 🛁 1バスルーム');
-  assert.ok(!JSON.parse(run(env, 'JSON.stringify(__n)')).some((x) => /Bed|Bath/i.test(x)), 'Bed/Bath never reached the translator');
+  run(env, `LanguageApp.translate = function (t, f, to) { return '[' + to + '] ' + t; }`);
+  const jp = asm(env, sourcePost, 'JP'), ru = asm(env, sourcePost, 'RU'), de = asm(env, sourcePost, 'DE');
+  assert.ok(/9階 \| 📐 47 ㎡ \| 1🛏 \| 1🛁/.test(jp) && /特徴:/.test(jp) && /専有面積 38㎡/.test(jp) && /📍 Residence L, BKK1/.test(jp), jp);
+  assert.ok(/9 этаж \| 📐 47 м² \| 1🛏 \| 1🛁/.test(ru) && /Особенности:/.test(ru), ru);
+  assert.ok(/9\. Etage \| 📐 47 m² \| 1🛏 \| 1🛁/.test(de) && /Ausstattung:/.test(de), de);
+});
+test('COMPACT: a studio, a ground floor, 1.5 baths, a rental and utilities', () => {
+  const env = makeEnv();
+  const rent = '#ForRent $650/month\n\nSKY VILLA | STUDIO\n📍 Tonle Bassac, Phnom Penh\n\nUNIT DETAILS\n✅ Studio | 1 Bath\n✅ Floor G\n✅ 38 sqm\n✅ Fully Furnished\n💧 Water $0.5 per m3\n⚡ Electricity $0.25 per kWh';
+  const out = asm(env, rent, 'EN');
+  assert.ok(/^#ForRent \$650\/month\n\n📍 Sky Villa, Tonle Bassac\n\nGround floor \| 📐 38 sqm \| Studio \| 1🛁\n\nFeatures:\n✅ Fully Furnished\n\nUtilities:\n💧 Water \$0\.5 per m3\n⚡ Electricity \$0\.25 per kWh\n\n/.test(out), out);
+  assert.ok(/2🛏 \| 1\.5🛁/.test(asm(env, sourcePost.replace('1 Bedroom | 1 Bathroom', '2 Beds | 1.5 Baths'), 'EN')));
+});
+test('COMPACT: not used for a promotion or a post without bedrooms and bathrooms, which keep the old layout', () => {
+  const env = makeEnv();
+  const promo = '#ForSale $99,000\n\nTIME SQUARE 7 | NEW LAYOUT\n📍 Toul Kork, Phnom Penh\n\nPROMOTION\n✅ 1 Bedroom Duplex\n✅ 65㎡ Gross Area\n✅ Up to 35-Month Installment';
+  const out = asm(env, promo, 'EN');
+  assert.ok(/UNIT DETAILS/.test(out) && /1 Bedroom Duplex/.test(out) && !/Features:|🛏/.test(out), out);
+});
+test('COMPACT: your old and new bed and bath wording both give the same compact line, and the old layout still gets the emoji line first', () => {
+  const env = makeEnv();
+  const a = asm(env, sourcePost, 'EN'), b = asm(env, sourcePost.replace('✅ 1 Bedroom | 1 Bathroom', '🛏 1 Bed | 🛁 1 Bath'), 'EN');
+  assert.strictEqual(a, b);
+  const noHashtag = sourcePost.replace('#ForSale $35,000\n\n', '');
+  assert.ok(/UNIT DETAILS\n🛏 1 Bed \| 🛁 1 Bath\n/.test(asm(env, noHashtag, 'EN')));
+});
+test('COMPACT: a post forwarded from your own channel is rebuilt the same way, other forwards keep the whole text path', () => {
+  const env = makeEnv();
+  env.ctx.__post = '#ForSale $35,000\n\n𝗥𝗘𝗦𝗜𝗗𝗘𝗡𝗖𝗘 𝗟 | 𝟭𝗕𝗥 𝗨𝗡𝗜𝗧\n📍 Boeung Tumpun, Phnom Penh\n\nUNIT DETAILS\n✅ Unit G10-09 | 9th Floor\n✅ 1 Bedroom | 1 Bathroom\n✅ 47㎡ Gross | 38㎡ Net\n\n📞 096 96 61 555\n🏠 t.me/NickREAKH';
+  run(env, `processChannelListing('${CHAT}', __post, ['F1'], true, 'NickREAKH', null)`);
+  const H = JSON.parse(run(env, 'JSON.stringify(HEADERS)'));
+  const en = env.sheetData.slice(1).find((r) => r[H.indexOf('language')] === 'EN')[H.indexOf('content')];
+  assert.ok(/📍 Residence L, Boeung Tumpun\n\nFloor 9 \| 📐 47 sqm \| 1🛏 \| 1🛁/.test(en) && !/096 96 61 555|NickREAKH|G10-09/.test(en), en);
+  env.ctx.__promo = 'TIME SQUARE 7 | NEW LAYOUT\nPromotion for everyone\n📞 096 96 61 555';
+  const before = env.sheetData.length;
+  run(env, `processChannelListing('${CHAT}', __promo, ['F1'], true, 'NickREAKH', null)`);
+  assert.ok(env.sheetData.length > before);
+});
+test('COMPACT: read back by the website draft reader: building, area, floor, size, bedrooms, bathrooms and features', () => {
+  const env = makeEnv();
+  const post = '#ForSale $35,000\n\n📍 Residence L, Boeung Tumpun\n\nFloor 9 | 📐 47 sqm | 1🛏 | 1🛁\n\nFeatures:\n✅ Strata Title\n✅ Fully Furnished\n\n🔗 https://www.propertyhubcambodia.com/property/residence-l-1-bedroom-floor-9-1022\n\n――――――――――\n📞 011 666 952\n📱 t.me/PropertyHubCambodia';
+  const f = JSON.parse(run(env, `JSON.stringify(parseUnitFacts(${JSON.stringify(post)}))`));
+  assert.strictEqual(f.buildingName, 'Residence L'); assert.strictEqual(f.locationText, 'Boeung Tumpun'); assert.strictEqual(f.floor, '9');
+  assert.strictEqual(f.sqm, 47); assert.strictEqual(f.bedrooms, 1); assert.strictEqual(f.bathrooms, 1); assert.strictEqual(f.price, 35000);
+  assert.deepStrictEqual(f.extraFeatures, ['Strata Title', 'Fully Furnished']);
+});
+test('REPLY BY LINK: a post with only the page link (no code) still finds its unit for REDUCED and SOLD replies', () => {
+  const env = priceEnv();
+  chanRow(env, '#ForSale $62,000\n\n🔗 https://www.propertyhubcambodia.com/property/time-square-10-1-bedroom-floor-6-1021\n\n――――――――――\n📞 011 666 952');
+  run(env, `handleStatusReply(${CHAT}, 'REDUCED $58,500', 555)`);
+  assert.strictEqual(env.intakeLog.filter((p) => p.action === 'lookup')[0].id, 21);
+  assert.ok(/Found TS10-1021/.test(env.sent().pop().text));
+  chanRow(env, '#ForSale $62,000\n🔗 https://www.propertyhubcambodia.com/property/time-square-10-1-bedroom-floor-6-1021');
+  run(env, `handleStatusReply(${CHAT}, 'SOLD', 555)`);
+  assert.ok(/Mark it as sold/.test(env.sent().pop().text));
+  chanRow(env, '#ForSale $62,000\n🔗 https://www.propertyhubcambodia.com/property/gato-tower');
+  run(env, `handleStatusReply(${CHAT}, 'SOLD', 555)`);
+  assert.ok(/no page on the website/.test(env.sent().pop().text), 'a project link is not a unit');
 });
 test('BEDBATH: "1 Bedroom Duplex" stays an ordinary bullet', () => {
   const env = makeEnv();
