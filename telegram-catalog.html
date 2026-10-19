@@ -1,0 +1,591 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>PHC VIP Catalog · Color Cards</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #0b0f19;
+      --card-bg: rgba(17, 24, 39, 0.75);
+      --card-border: rgba(255, 255, 255, 0.08);
+      --text: #f9fafb;
+      --text-muted: #9ca3af;
+      --urgent: #ef4444;
+      --urgent-glow: rgba(239, 68, 68, 0.35);
+      --rent: #10b981;
+      --rent-glow: rgba(16, 185, 129, 0.35);
+      --project: #a855f7;
+      --project-glow: rgba(168, 85, 247, 0.35);
+      --sale: #3b82f6;
+      --sale-glow: rgba(59, 130, 246, 0.35);
+      --gold: #f59e0b;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    body {
+      background: radial-gradient(circle at 50% 0%, #1e293b 0%, #0b0f19 70%);
+      color: var(--text);
+      font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+      min-height: 100vh;
+      padding: 16px;
+      padding-bottom: 40px;
+    }
+
+    /* Header */
+    .header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 16px;
+      padding-bottom: 12px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .brand-logo {
+      width: 36px;
+      height: 36px;
+      border-radius: 10px;
+      background: linear-gradient(135deg, #f59e0b, #d97706);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 800;
+      font-size: 16px;
+      color: #000;
+      box-shadow: 0 4px 12px rgba(245, 158, 11, 0.3);
+    }
+
+    .brand-title {
+      font-weight: 800;
+      font-size: 15px;
+      letter-spacing: -0.3px;
+    }
+
+    .brand-sub {
+      font-size: 11px;
+      color: var(--text-muted);
+    }
+
+    /* Filter Pills */
+    .filters {
+      display: flex;
+      gap: 8px;
+      overflow-x: auto;
+      padding-bottom: 12px;
+      margin-bottom: 12px;
+      scrollbar-width: none;
+    }
+    .filters::-webkit-scrollbar { display: none; }
+
+    .filter-btn {
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      color: var(--text-muted);
+      padding: 7px 14px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 600;
+      white-space: nowrap;
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+
+    .filter-btn.active {
+      background: #ffffff;
+      color: #0b0f19;
+      border-color: #ffffff;
+      box-shadow: 0 4px 12px rgba(255, 255, 255, 0.2);
+    }
+
+    /* Cards Grid */
+    .cards-container {
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+    }
+
+    .card {
+      background: var(--card-bg);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      border-radius: 20px;
+      overflow: hidden;
+      border: 2px solid transparent;
+      transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+      position: relative;
+    }
+
+    /* 4 Distinct Glowing Colored Borders */
+    .card.urgent {
+      border-color: var(--urgent);
+      box-shadow: 0 0 24px var(--urgent-glow), inset 0 1px 0 rgba(239, 68, 68, 0.3);
+    }
+    .card.rent {
+      border-color: var(--rent);
+      box-shadow: 0 0 24px var(--rent-glow), inset 0 1px 0 rgba(16, 185, 129, 0.3);
+    }
+    .card.project {
+      border-color: var(--project);
+      box-shadow: 0 0 24px var(--project-glow), inset 0 1px 0 rgba(168, 85, 247, 0.3);
+    }
+    .card.sale {
+      border-color: var(--sale);
+      box-shadow: 0 0 24px var(--sale-glow), inset 0 1px 0 rgba(59, 130, 246, 0.3);
+    }
+
+    /* Media Area */
+    .card-media {
+      position: relative;
+      height: 200px;
+      width: 100%;
+      overflow: hidden;
+      background: #1f2937;
+    }
+
+    .card-media img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      transition: transform 0.4s ease;
+    }
+
+    .media-badge {
+      position: absolute;
+      top: 12px;
+      right: 12px;
+      background: rgba(0, 0, 0, 0.65);
+      backdrop-filter: blur(8px);
+      color: #fff;
+      font-size: 11px;
+      font-weight: 700;
+      padding: 5px 10px;
+      border-radius: 8px;
+      border: 1px solid rgba(255, 255, 255, 0.2);
+    }
+
+    /* Card Content */
+    .card-body {
+      padding: 16px;
+    }
+
+    .category-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 11px;
+      font-weight: 800;
+      letter-spacing: 0.5px;
+      text-transform: uppercase;
+      padding: 4px 10px;
+      border-radius: 6px;
+      margin-bottom: 10px;
+    }
+
+    .urgent .category-pill {
+      background: rgba(239, 68, 68, 0.15);
+      color: #f87171;
+      border: 1px solid rgba(239, 68, 68, 0.3);
+    }
+    .rent .category-pill {
+      background: rgba(16, 185, 129, 0.15);
+      color: #34d399;
+      border: 1px solid rgba(16, 185, 129, 0.3);
+    }
+    .project .category-pill {
+      background: rgba(168, 85, 247, 0.15);
+      color: #c084fc;
+      border: 1px solid rgba(168, 85, 247, 0.3);
+    }
+    .sale .category-pill {
+      background: rgba(59, 130, 246, 0.15);
+      color: #60a5fa;
+      border: 1px solid rgba(59, 130, 246, 0.3);
+    }
+
+    .card-title {
+      font-size: 18px;
+      font-weight: 800;
+      color: #ffffff;
+      margin-bottom: 2px;
+    }
+
+    .card-price {
+      font-size: 16px;
+      font-weight: 700;
+      margin-bottom: 8px;
+      font-family: 'JetBrains Mono', monospace;
+    }
+    .urgent .card-price { color: #fca5a5; }
+    .rent .card-price { color: #6ee7b7; }
+    .project .card-price { color: #d8b4fe; }
+    .sale .card-price { color: #93c5fd; }
+
+    .card-location {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      font-size: 12px;
+      color: var(--text-muted);
+      margin-bottom: 14px;
+    }
+
+    /* Specs Box */
+    .specs-box {
+      background: rgba(0, 0, 0, 0.35);
+      border-radius: 10px;
+      padding: 10px 12px;
+      margin-bottom: 16px;
+      border-left: 3px solid;
+    }
+    .urgent .specs-box { border-left-color: var(--urgent); }
+    .rent .specs-box { border-left-color: var(--rent); }
+    .project .specs-box { border-left-color: var(--project); }
+    .sale .specs-box { border-left-color: var(--sale); }
+
+    .specs-line {
+      font-size: 12px;
+      line-height: 1.6;
+      color: #e2e8f0;
+    }
+    .specs-line strong {
+      color: #fff;
+    }
+
+    /* Action Buttons (Solid Vibrant Colors from Mockup) */
+    .btn-group {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      margin-bottom: 8px;
+    }
+
+    .btn {
+      border: none;
+      padding: 12px 14px;
+      border-radius: 12px;
+      font-size: 13px;
+      font-weight: 700;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      transition: transform 0.15s ease, opacity 0.2s ease;
+    }
+    .btn:active {
+      transform: scale(0.97);
+    }
+
+    .btn-approve {
+      background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+      color: #ffffff;
+      box-shadow: 0 4px 14px rgba(16, 185, 129, 0.4);
+    }
+
+    .btn-reject {
+      background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
+      color: #ffffff;
+      box-shadow: 0 4px 14px rgba(239, 68, 68, 0.4);
+    }
+
+    .btn-contact {
+      width: 100%;
+      background: rgba(255, 255, 255, 0.08);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      color: #ffffff;
+      padding: 10px;
+      border-radius: 10px;
+      font-size: 12px;
+      font-weight: 600;
+      text-decoration: none;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      margin-top: 6px;
+    }
+
+    /* Approved State */
+    .card.is-approved .btn-group {
+      display: none;
+    }
+    .approved-banner {
+      display: none;
+      background: rgba(16, 185, 129, 0.2);
+      border: 1px solid rgba(16, 185, 129, 0.4);
+      color: #34d399;
+      padding: 10px;
+      border-radius: 10px;
+      font-size: 12px;
+      font-weight: 700;
+      text-align: center;
+      margin-top: 6px;
+    }
+    .card.is-approved .approved-banner {
+      display: block;
+      animation: fadeIn 0.3s ease;
+    }
+
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(4px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- App Header -->
+  <header class="header">
+    <div class="brand">
+      <div class="brand-logo">P</div>
+      <div>
+        <div class="brand-title">Property Hub Cambodia</div>
+        <div class="brand-sub">VIP Catalog & Review Deck</div>
+      </div>
+    </div>
+    <div style="font-size: 11px; background: rgba(245, 158, 11, 0.15); color: #f59e0b; padding: 4px 8px; border-radius: 6px; font-weight: 700; border: 1px solid rgba(245, 158, 11, 0.3);">
+      4 CATEGORIES
+    </div>
+  </header>
+
+  <!-- Filter Pills -->
+  <nav class="filters">
+    <button class="filter-btn active" onclick="filterCategory('all', this)">All (4)</button>
+    <button class="filter-btn" onclick="filterCategory('urgent', this)">🔴 Urgent (1)</button>
+    <button class="filter-btn" onclick="filterCategory('rent', this)">🟢 Rent (1)</button>
+    <button class="filter-btn" onclick="filterCategory('project', this)">🟣 Projects (1)</button>
+    <button class="filter-btn" onclick="filterCategory('sale', this)">🔵 Sale (1)</button>
+  </nav>
+
+  <!-- Cards Container -->
+  <main class="cards-container">
+
+    <!-- 1. URGENT RESALE (RED GLOWING BORDER) -->
+    <article class="card urgent" data-cat="urgent" id="card-urgent">
+      <div class="card-media">
+        <img src="https://images.unsplash.com/photo-1545324418-cc1a3fa10c00?auto=format&fit=crop&w=800&q=80" alt="Time Square 8">
+        <div class="media-badge">📸 1 Photo</div>
+      </div>
+      <div class="card-body">
+        <div class="category-pill">🔴 [URGENT RESALE]</div>
+        <h2 class="card-title">TIME SQUARE 8 | 2BR</h2>
+        <div class="card-price">#ForSale $99,000 (Urgent)</div>
+        <div class="card-location">📍 Boeng Trabek / Toul Tompoung, Chamkarmon</div>
+
+        <div class="specs-box">
+          <div class="specs-line">▫️ <strong>Floor:</strong> 32nd Floor · City Skyline View</div>
+          <div class="specs-line">▫️ <strong>Size:</strong> 73 sqm Gross · 54 sqm Net</div>
+          <div class="specs-line">▫️ <strong>Layout:</strong> 2 Beds · 1 Bath · Balcony</div>
+          <div class="specs-line">▫️ <strong>Price:</strong> $1,356/sqm (Below Developer Price!)</div>
+        </div>
+
+        <div class="btn-group">
+          <button class="btn btn-approve" onclick="handleApprove('card-urgent', 'Time Square 8')">
+            🟢 Approve All (4 Ch)
+          </button>
+          <button class="btn btn-reject" onclick="handleReject('card-urgent')">
+            🔴 Reject All
+          </button>
+        </div>
+
+        <div class="approved-banner">
+          ✅ POSTED to EN + JP + RU + DE
+        </div>
+
+        <a href="https://t.me/Nick_REAKH" class="btn-contact">
+          💬 Connect with Nick (@Nick_REAKH)
+        </a>
+      </div>
+    </article>
+
+    <!-- 2. FOR RENT (GREEN GLOWING BORDER) -->
+    <article class="card rent" data-cat="rent" id="card-rent">
+      <div class="card-media">
+        <img src="https://images.unsplash.com/photo-1502672260266-1c1ef2d93688?auto=format&fit=crop&w=800&q=80" alt="Time Square 306">
+        <div class="media-badge">📸 3 Photos</div>
+      </div>
+      <div class="card-body">
+        <div class="category-pill">🟢 [FOR RENT]</div>
+        <h2 class="card-title">TIME SQUARE 306 | 1BR</h2>
+        <div class="card-price">#ForRent $650 / month</div>
+        <div class="card-location">📍 BKK1, Chamkarmon, Phnom Penh</div>
+
+        <div class="specs-box">
+          <div class="specs-line">▫️ <strong>Floor:</strong> 18th Floor · Fully Furnished</div>
+          <div class="specs-line">▫️ <strong>Size:</strong> 55 sqm (16.6 坪)</div>
+          <div class="specs-line">▫️ <strong>Amenities:</strong> Rooftop Infinity Pool & Sky Gym</div>
+          <div class="specs-line">▫️ <strong>Terms:</strong> 1-Year Contract · 2 Mo Deposit</div>
+        </div>
+
+        <div class="btn-group">
+          <button class="btn btn-approve" onclick="handleApprove('card-rent', 'Time Square 306')">
+            🟢 Approve All (4 Ch)
+          </button>
+          <button class="btn btn-reject" onclick="handleReject('card-rent')">
+            🔴 Reject All
+          </button>
+        </div>
+
+        <div class="approved-banner">
+          ✅ POSTED to EN + JP + RU + DE
+        </div>
+
+        <a href="https://t.me/Nick_REAKH" class="btn-contact">
+          💬 Connect with Nick (@Nick_REAKH)
+        </a>
+      </div>
+    </article>
+
+    <!-- 3. NEW PROJECT (PURPLE GLOWING BORDER) -->
+    <article class="card project" data-cat="project" id="card-project">
+      <div class="card-media">
+        <img src="https://images.unsplash.com/photo-1486406146926-c627a92ad1ab?auto=format&fit=crop&w=800&q=80" alt="Time Square 9">
+        <div class="media-badge">🎥 1 Video Tour</div>
+      </div>
+      <div class="card-body">
+        <div class="category-pill">🟣 [NEW PROJECT]</div>
+        <h2 class="card-title">TIME SQUARE 9 | LAUNCH</h2>
+        <div class="card-price">#NewProject From $48,000</div>
+        <div class="card-location">📍 Toul Tompoung (Russian Market Area)</div>
+
+        <div class="specs-box">
+          <div class="specs-line">▫️ <strong>Sizes:</strong> 38 sqm – 85 sqm (Studio, 1BR, 2BR)</div>
+          <div class="specs-line">▫️ <strong>Payment:</strong> $480/month (0% Interest Developer Plan)</div>
+          <div class="specs-line">▫️ <strong>Developer:</strong> Megakim World (Towers 1-8 Delivered)</div>
+          <div class="specs-line">▫️ <strong>Handover:</strong> 2027 · Foreign Strata Title</div>
+        </div>
+
+        <div class="btn-group">
+          <button class="btn btn-approve" onclick="handleApprove('card-project', 'Time Square 9')">
+            🟢 Approve All (4 Ch)
+          </button>
+          <button class="btn btn-reject" onclick="handleReject('card-project')">
+            🔴 Reject All
+          </button>
+        </div>
+
+        <div class="approved-banner">
+          ✅ POSTED to EN + JP + RU + DE
+        </div>
+
+        <a href="https://t.me/Nick_REAKH" class="btn-contact">
+          💬 Connect with Nick (@Nick_REAKH)
+        </a>
+      </div>
+    </article>
+
+    <!-- 4. FOR SALE (BLUE GLOWING BORDER) -->
+    <article class="card sale" data-cat="sale" id="card-sale">
+      <div class="card-media">
+        <img src="https://images.unsplash.com/photo-1600585154340-be6161a56a0c?auto=format&fit=crop&w=800&q=80" alt="Odom Living">
+        <div class="media-badge">📸 2 Photos</div>
+      </div>
+      <div class="card-body">
+        <div class="category-pill">🔵 [FOR SALE]</div>
+        <h2 class="card-title">ODOM LIVING | 2BR</h2>
+        <div class="card-price">#ForSale $120,000</div>
+        <div class="card-location">📍 Tonle Bassac, Phnom Penh</div>
+
+        <div class="specs-box">
+          <div class="specs-line">▫️ <strong>Floor:</strong> 12th Floor · River View</div>
+          <div class="specs-line">▫️ <strong>Size:</strong> 78 sqm Gross · 2 Beds · 2 Baths</div>
+          <div class="specs-line">▫️ <strong>Standard:</strong> Singapore Design & Luxury Spec</div>
+          <div class="specs-line">▫️ <strong>Projected Yield:</strong> 8.0% – 8.8% Net</div>
+        </div>
+
+        <div class="btn-group">
+          <button class="btn btn-approve" onclick="handleApprove('card-sale', 'Odom Living')">
+            🟢 Approve All (4 Ch)
+          </button>
+          <button class="btn btn-reject" onclick="handleReject('card-sale')">
+            🔴 Reject All
+          </button>
+        </div>
+
+        <div class="approved-banner">
+          ✅ POSTED to EN + JP + RU + DE
+        </div>
+
+        <a href="https://t.me/Nick_REAKH" class="btn-contact">
+          💬 Connect with Nick (@Nick_REAKH)
+        </a>
+      </div>
+    </article>
+
+  </main>
+
+  <script>
+    // Initialize Telegram WebApp
+    if (window.Telegram && window.Telegram.WebApp) {
+      const tg = window.Telegram.WebApp;
+      tg.ready();
+      tg.expand();
+      if (tg.setHeaderColor) tg.setHeaderColor('#0b0f19');
+      if (tg.setBackgroundColor) tg.setBackgroundColor('#0b0f19');
+    }
+
+    function triggerHaptic(type) {
+      if (window.Telegram && window.Telegram.WebApp && window.Telegram.WebApp.HapticFeedback) {
+        if (type === 'success') {
+          window.Telegram.WebApp.HapticFeedback.notificationOccurred('success');
+        } else {
+          window.Telegram.WebApp.HapticFeedback.impactOccurred('medium');
+        }
+      }
+    }
+
+    function filterCategory(cat, btn) {
+      triggerHaptic('medium');
+      document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+
+      const cards = document.querySelectorAll('.card');
+      cards.forEach(card => {
+        if (cat === 'all' || card.dataset.cat === cat) {
+          card.style.display = 'block';
+        } else {
+          card.style.display = 'none';
+        }
+      });
+    }
+
+    function handleApprove(cardId, title) {
+      triggerHaptic('success');
+      const card = document.getElementById(cardId);
+      if (card) {
+        card.classList.add('is-approved');
+      }
+      if (window.Telegram && window.Telegram.WebApp && window.Telegram.WebApp.showAlert) {
+        window.Telegram.WebApp.showAlert(`✅ Approved! ${title} scheduled for EN + JP + RU + DE broadcast.`);
+      }
+    }
+
+    function handleReject(cardId) {
+      triggerHaptic('medium');
+      const card = document.getElementById(cardId);
+      if (card) {
+        card.style.opacity = '0.35';
+        const btns = card.querySelector('.btn-group');
+        if (btns) btns.innerHTML = '<div style="color: #ef4444; font-weight: 700; font-size: 12px; text-align: center; width: 100%; grid-column: span 2;">❌ REJECTED</div>';
+      }
+    }
+  </script>
+</body>
+</html>
