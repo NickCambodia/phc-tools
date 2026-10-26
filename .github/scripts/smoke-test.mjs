@@ -62,6 +62,19 @@ async function mockExternalCalls(page) {
   await page.route(/api\.frankfurter\.dev\//, (route) => {
     route.fulfill({ status: 200, contentType: "application/json", body: '{"rates":{}}' });
   });
+  // telegram-catalog.html loads the Telegram Mini App SDK and Unsplash
+  // placeholder photos. Same reasoning as the FX-rate mocks above: CI
+  // shouldn't depend on reaching telegram.org or unsplash.com to pass.
+  await page.route(/telegram\.org\/js\//, (route) => {
+    route.fulfill({ status: 200, contentType: "text/javascript", body: "" });
+  });
+  await page.route(/images\.unsplash\.com\//, (route) => {
+    route.fulfill({
+      status: 200,
+      contentType: "image/gif",
+      body: Buffer.from("R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==", "base64"),
+    });
+  });
 }
 
 async function main() {
