@@ -168,5 +168,14 @@ t('List access keys shows names and roles, never the keys', () => {
   assert.ok(/Nick\s+·\s+staff/.test(shown) && /old shared key \(API_KEY\) still works/.test(shown) && !shown.includes(k), shown);
 });
 
+t('first setup makes the 4 team keys and the website key at once, and never runs twice', () => {
+  const s = load(); s.ctx.accessSetupAll();
+  const keys = s.alerts[0].match(/phc_[a-z]+_[0-9a-f]{32}/g);
+  assert.strictEqual(keys.length, 5); assert.ok(/Nick \(staff\)/.test(s.alerts[0]) && /Website \(website\)/.test(s.alerts[0]));
+  assert.strictEqual(s.get({ action: 'getAll', sheet: 'Leads', key: keys[0] }).length, 2);
+  assert.deepStrictEqual(s.get({ action: 'getAll', sheet: 'Leads', key: keys[4] }), UNAUTH); // the website key cannot read
+  s.ctx.accessSetupAll(); assert.ok(/already exist/.test(s.alerts[1])); assert.strictEqual(s.props.size, 5);
+});
+
 console.log('\nRESULTS: ' + pass + ' / ' + (pass + fail) + ' TESTS PASSED' + (fail ? '' : ' (100%)'));
 process.exit(fail ? 1 : 0);

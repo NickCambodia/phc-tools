@@ -1422,6 +1422,7 @@ function sendAgentNotification(lead, scenario, lang) {
 // (for example after a lost phone): the old key stops working at once.
 function onOpen() {
   SpreadsheetApp.getUi().createMenu('PHC Access')
+    .addItem('First setup: create all team keys', 'accessSetupAll')
     .addItem('Create or replace an access key', 'accessCreate')
     .addItem('List access keys', 'accessList')
     .addItem('Remove an access key', 'accessRemove')
@@ -1453,6 +1454,21 @@ function accessCreate() {
   props.setProperty('K_' + fingerprint_(key), JSON.stringify({ name: name, role: role, created: new Date().toISOString().slice(0, 10) }));
   ui.alert('Access key for ' + name + ' (' + role + ')',
     key + '\n\nCopy it now: it is shown only this once.\nSend it to the person privately (not in a group).', ui.ButtonSet.OK);
+}
+
+// One click for the first setup: a staff key for each team member and the website key, shown together once.
+// Refuses to run when keys already exist, so it can never replace a key someone is using.
+const FIRST_KEYS_ = [['Nick', 'staff'], ['Monika', 'staff'], ['Reza', 'staff'], ['Marina', 'staff'], ['Website', 'website']];
+function accessSetupAll() {
+  const ui = SpreadsheetApp.getUi();
+  if (accessKeys_().length) { ui.alert('Keys already exist. Use "Create or replace an access key" for one person instead.'); return; }
+  const props = PropertiesService.getScriptProperties();
+  const lines = FIRST_KEYS_.map(function (nr) {
+    const key = 'phc_' + nr[1] + '_' + Utilities.getUuid().replace(/-/g, '');
+    props.setProperty('K_' + fingerprint_(key), JSON.stringify({ name: nr[0], role: nr[1], created: new Date().toISOString().slice(0, 10) }));
+    return nr[0] + ' (' + nr[1] + '):\n' + key;
+  });
+  ui.alert('Your new access keys', lines.join('\n\n') + '\n\nCopy all of them now: they are shown only this once.\nSend each person only their own key, privately. The Website key goes into Vercel.', ui.ButtonSet.OK);
 }
 
 function accessList() {
