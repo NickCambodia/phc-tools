@@ -11,13 +11,11 @@
 //     • Who has access: Anyone
 //  5. Copy the Web App URL → paste into each tool's settings
 //
-//  NOTE (2026-08-12): LOGO_DATA_URI and the three ICON_*_GOLD/NAVY
-//  constants below are PLACEHOLDERS. Their real values are long
-//  base64-encoded images that live only in the deployed Apps Script —
-//  they were never fully captured here (screenshots / paste-size limits).
-//  DO NOT paste this file over the live one without first copying the
-//  real values for those four constants from the live editor, or every
-//  email image will break.
+//  NOTE (2026-08-12, checked again 2026-10-27): LOGO_DATA_URI and the
+//  three ICON_*_GOLD/NAVY constants below are placeholders, and the live
+//  script has the same placeholders since the 2026-10-11 restore. No email
+//  uses them (the emails are text and HTML only), so pasting this file
+//  over the live one breaks nothing.
 // ═══════════════════════════════════════════════════════════════
 
 const SHEET_HEADERS = {
@@ -670,9 +668,12 @@ function parseViewingDetails(lead) {
 }
 
 function parseInquiryType(lead) {
-  // Skip [Language: ...] tags — find the first other [...]
-  const match = (lead.notes || '').match(/\[(?!Language:)([^\]]+)\]/i);
-  return match ? match[1] : 'Property Inquiry';
+  // The client's own choice ("[Buying a Property] ..."). Skip the website's bookkeeping
+  // tags [Language: ...] and [Form: ...]: they must never reach the client's email
+  // (before 2026-10-27 every homepage lead's email showed "Form: Homepage Contact Form").
+  // No choice: no Inquiry row at all.
+  const match = (lead.notes || '').match(/\[(?!Language:|Form:)([^\]]+)\]/i);
+  return match ? match[1] : '';
 }
 
 // /welcome writes the visitor's answers as one sentence (buildBaseMessage in
