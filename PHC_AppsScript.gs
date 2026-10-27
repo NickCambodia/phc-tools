@@ -136,6 +136,7 @@ function doPost(e) {
 // (the bot alerts Nick itself). On an existing row the bot only adds a dated history entry
 // and fills fields that are still empty, so what the team typed (stage, agent, notes,
 // follow-up) is never overwritten.
+const BOT_DELETED_ = 'Deleted at the client\'s request';
 const BOT_FIELDS_ = ['fullName', 'nationality', 'telegram', 'budget', 'timeline', 'interestedIn', 'score'];
 
 function botActs_(v) {
@@ -155,7 +156,14 @@ function botUpsert_(lead, event) {
     return r.success ? { success: true, created: true } : r;
   }
   const upd = { activities: [entry].concat(botActs_(row.activities)) };
-  BOT_FIELDS_.forEach(function (k) { if (lead[k] && !row[k]) upd[k] = String(lead[k]).slice(0, 500); });
+  if (row.fullName === BOT_DELETED_) {
+    // the client deleted their data earlier and came back: a fresh lead again (the history keeps the deletion note)
+    BOT_FIELDS_.forEach(function (k) { upd[k] = lead[k] !== undefined ? String(lead[k]).slice(0, 500) : ''; });
+    Object.assign(upd, { source: 'Telegram', stage: 'New Lead', agent: 'Nick', notes: String(lead.notes || '').slice(0, 2000), lastContact: now.slice(0, 10) });
+    const r0 = updateRow('Leads', lead.id, upd);
+    return r0.success ? { success: true, created: true } : r0;
+  }
+  BOT_FIELDS_.forEach(function (k) { if (lead[k] && (!row[k] || (k === 'nationality' && row[k] === 'Other'))) upd[k] = String(lead[k]).slice(0, 500); });
   if (lead.telegram && row.telegram !== lead.telegram) upd.telegram = String(lead.telegram).slice(0, 200); // username changes
   if (lead.interestedIn && row.interestedIn && row.interestedIn.indexOf(lead.interestedIn) === -1) {
     upd.interestedIn = (row.interestedIn + ', ' + lead.interestedIn).slice(0, 500); // another unit asked about
@@ -168,7 +176,7 @@ function botForget_(id) {
   if (!/^TG-\d+$/.test(String(id || ''))) return { error: 'Bot clients need an id like TG-123' };
   const exists = getAllRows('Leads').some(function (r) { return String(r.id) === String(id); });
   if (!exists) return { success: true, missing: true };
-  const blank = { fullName: 'Deleted at the client\'s request', telegram: '', phone: '', email: '', notes: '', interestedIn: '',
+  const blank = { fullName: BOT_DELETED_, telegram: '', phone: '', email: '', notes: '', interestedIn: '',
     budget: '', timeline: '', stage: 'Released', followUpDate: '', followUpAction: '',
     activities: [{ type: 'System', note: 'The client deleted their data in the Telegram bot.', ts: new Date().toISOString() }] };
   return updateRow('Leads', id, blank);

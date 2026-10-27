@@ -151,6 +151,24 @@ t('bot: can never write to a website lead, and forgetting a client blanks the pe
   assert.deepStrictEqual(s.post({ action: 'botForget', sheet: 'Leads', key: k, id: 'TG-404' }), { success: true, missing: true });
 });
 
+t('bot: a client who deleted their data and comes back is a fresh lead again', () => {
+  const s = load(); const k = s.makeKey('Telegram bot', 'bot');
+  s.post({ action: 'botForget', sheet: 'Leads', key: k, id: 'TG-1' });
+  s.post({ action: 'botUpsert', sheet: 'Leads', key: k, event: 'Guide sent (Japanese PDF)', lead: { id: 'TG-1', fullName: 'Taro', nationality: 'Japanese', telegram: 'tg:1', notes: 'From the bot' } });
+  const row = s.sheetRows.Leads.find((x) => x.id === 'TG-1');
+  assert.deepStrictEqual([row.fullName, row.stage, row.agent, row.nationality, row.notes, row.source], ['Taro', 'New Lead', 'Nick', 'Japanese', 'From the bot', 'Telegram']);
+  const acts = JSON.parse(row.activities); assert.strictEqual(acts[0].note, 'Guide sent (Japanese PDF)'); assert.ok(/deleted their data/.test(acts[1].note));
+});
+
+t('bot: "Other" nationality is upgraded once the client picks a language; a real one is kept', () => {
+  const s = load(); const k = s.makeKey('Telegram bot', 'bot');
+  s.sheetRows.Leads.push({ id: 'TG-8', fullName: 'A', nationality: 'Other', activities: '[]' }, { id: 'TG-9', fullName: 'B', nationality: 'German', activities: '[]' });
+  s.post({ action: 'botUpsert', sheet: 'Leads', key: k, lead: { id: 'TG-8', nationality: 'Japanese' } });
+  s.post({ action: 'botUpsert', sheet: 'Leads', key: k, lead: { id: 'TG-9', nationality: 'Japanese' } });
+  assert.strictEqual(s.sheetRows.Leads.find((x) => x.id === 'TG-8').nationality, 'Japanese');
+  assert.strictEqual(s.sheetRows.Leads.find((x) => x.id === 'TG-9').nationality, 'German');
+});
+
 t('the website key cannot use the bot actions', () => {
   const s = load(); const k = s.makeKey('Website', 'website');
   assert.deepStrictEqual(s.post({ action: 'botUpsert', sheet: 'Leads', key: k, lead: { id: 'TG-1' } }), UNAUTH);
