@@ -63,7 +63,7 @@ const SHEET_HEADERS = {
 // "PHC Access" (see the end of this file), never written in any tool.
 //   staff   : everything (one key per person, typed once per device in the tools)
 //   website : ping, the daily health check, add a lead (Vercel /api/submit-lead)
-//   bot     : ping, add or update a lead, find a lead (Nick's Telegram bot)
+//   bot     : ping, add or update its own clients, anonymize them (Nick's Telegram bot, see botUpsert_)
 //   bridge  : add or update a lead, check whether a lead exists (old lead sheet bridge)
 // The old shared API_KEY still counts as staff while it exists in Script
 // Properties; deleting that property is the last step of the switch.
@@ -71,7 +71,7 @@ const SHEET_HEADERS = {
 const ROLE_CAN_ = {
   staff:   '*',
   website: ['ping', 'healthcheck', 'insert:Leads'],
-  bot:     ['ping', 'insert:Leads', 'update:Leads', 'find:Leads'],
+  bot:     ['ping', 'botUpsert:Leads', 'botForget:Leads'],
   bridge:  ['insert:Leads', 'update:Leads', 'exists:Leads']
 };
 
@@ -119,11 +119,59 @@ function doPost(e) {
     if (body.action === 'update') return respond(updateRow(sheet, body.id, body.data));
     if (body.action === 'delete') return respond(deleteRow(sheet, body.id));
     if (body.action === 'find')   return respond(findLead_(body.by || {}));
+    if (body.action === 'botUpsert') return respond(botUpsert_(body.lead, body.event));
+    if (body.action === 'botForget') return respond(botForget_(body.id));
     if (body.action === 'exists') return respond({ exists: !!findLead_({ id: body.id }).lead });
     return respond({ error: 'Unknown action: ' + body.action });
   } catch (err) {
     return respond({ error: err.toString() });
   }
+}
+
+// ── Telegram bot clients (2026-10-27) ────────────────────────────
+// Nick's Telegram bot (role "bot") may only add or update its own clients, whose ids are
+// "TG-<telegram user id>", and anonymize them when a client deletes their data. It never
+// reads the Leads tab and can never touch a website lead.
+// A new row is quiet: no PHC email to the client (Nick's own brand) and no team alert
+// (the bot alerts Nick itself). On an existing row the bot only adds a dated history entry
+// and fills fields that are still empty, so what the team typed (stage, agent, notes,
+// follow-up) is never overwritten.
+const BOT_FIELDS_ = ['fullName', 'nationality', 'telegram', 'budget', 'timeline', 'interestedIn', 'score'];
+
+function botActs_(v) {
+  try { const a = JSON.parse(v || '[]'); return Array.isArray(a) ? a : []; } catch (err) { return []; }
+}
+
+function botUpsert_(lead, event) {
+  if (!lead || !/^TG-\d+$/.test(String(lead.id || ''))) return { error: 'Bot clients need an id like TG-123' };
+  const now = new Date().toISOString();
+  const entry = { type: 'Telegram', note: String(event || 'Activity in the Telegram bot').slice(0, 500), ts: now };
+  const row = getAllRows('Leads').filter(function (r) { return String(r.id) === String(lead.id); })[0];
+  if (!row) {
+    const data = { id: lead.id, source: 'Telegram', stage: 'New Lead', agent: 'Nick', lastContact: now.slice(0, 10),
+      notes: String(lead.notes || '').slice(0, 2000), activities: [entry] };
+    BOT_FIELDS_.forEach(function (k) { if (lead[k] !== undefined && lead[k] !== '') data[k] = String(lead[k]).slice(0, 500); });
+    const r = insertRow('Leads', data, { quiet: true });
+    return r.success ? { success: true, created: true } : r;
+  }
+  const upd = { activities: [entry].concat(botActs_(row.activities)) };
+  BOT_FIELDS_.forEach(function (k) { if (lead[k] && !row[k]) upd[k] = String(lead[k]).slice(0, 500); });
+  if (lead.telegram && row.telegram !== lead.telegram) upd.telegram = String(lead.telegram).slice(0, 200); // username changes
+  if (lead.interestedIn && row.interestedIn && row.interestedIn.indexOf(lead.interestedIn) === -1) {
+    upd.interestedIn = (row.interestedIn + ', ' + lead.interestedIn).slice(0, 500); // another unit asked about
+  }
+  const r = updateRow('Leads', lead.id, upd);
+  return r.success ? { success: true, created: false } : r;
+}
+
+function botForget_(id) {
+  if (!/^TG-\d+$/.test(String(id || ''))) return { error: 'Bot clients need an id like TG-123' };
+  const exists = getAllRows('Leads').some(function (r) { return String(r.id) === String(id); });
+  if (!exists) return { success: true, missing: true };
+  const blank = { fullName: 'Deleted at the client\'s request', telegram: '', phone: '', email: '', notes: '', interestedIn: '',
+    budget: '', timeline: '', stage: 'Released', followUpDate: '', followUpAction: '',
+    activities: [{ type: 'System', note: 'The client deleted their data in the Telegram bot.', ts: new Date().toISOString() }] };
+  return updateRow('Leads', id, blank);
 }
 
 // Finds one lead by id or by telegram (the telegram column may hold "@username" or "tg:123456").
@@ -195,7 +243,7 @@ function getAllRows(sheetName) {
     });
 }
 
-function insertRow(sheetName, data) {
+function insertRow(sheetName, data, opts) {
   if (!data || !data.id) return { error: 'Missing id' };
   const headers = SHEET_HEADERS[sheetName];
   if (!headers) return { error: 'Unknown sheet: ' + sheetName };
@@ -220,8 +268,8 @@ function insertRow(sheetName, data) {
     phoneCell.setValue(String(row[phoneIdx]));
   }
 
-  // Trigger confirmation email to client + alert to agent
-  if (sheetName === 'Leads') {
+  // Trigger confirmation email to client + alert to agent (not for quiet rows: the Telegram bot alerts Nick itself)
+  if (sheetName === 'Leads' && !(opts && opts.quiet)) {
     try { sendConfirmationEmails(data); } catch(err) { Logger.log('Email error: ' + err); }
     try { sendTelegramAlert(data); } catch(err) { Logger.log('Telegram error: ' + err); }
   }

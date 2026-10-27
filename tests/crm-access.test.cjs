@@ -43,13 +43,16 @@ function load() {
   vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'PHC_AppsScript.gs'), 'utf8'), ctx);
   // the sheet itself is faked: only the access rules are under test
   ctx.getAllRows = (name) => (sheetRows[name] || []).map((r) => Object.assign({}, r));
-  ctx.insertRow = (name, data) => { writes.push(['insert', name, data && data.id]); return { success: true, id: data && data.id }; };
-  ctx.updateRow = (name, id) => { writes.push(['update', name, id]); return { success: true }; };
+  const flat = (d) => Object.fromEntries(Object.entries(d || {}).map(([k, v]) => [k, typeof v === 'object' ? JSON.stringify(v) : String(v)]));
+  ctx.insertRow = (name, data, opts) => { writes.push(['insert', name, data && data.id, opts && opts.quiet ? 'quiet' : 'alerts']);
+    (sheetRows[name] = sheetRows[name] || []).push(flat(data)); return { success: true, id: data && data.id }; };
+  ctx.updateRow = (name, id, data) => { writes.push(['update', name, id]); const r = (sheetRows[name] || []).find((x) => String(x.id) === String(id));
+    if (!r) return { error: 'Row not found: ' + id }; Object.assign(r, flat(data)); return { success: true }; };
   ctx.deleteRow = (name, id) => { writes.push(['delete', name, id]); return { success: true }; };
   const get = (q) => ctx.doGet({ parameter: q }).body;
   const post = (b) => ctx.doPost({ postData: { contents: JSON.stringify(b) } }).body;
   const makeKey = (name, role) => { prompts.push(name, role); ctx.accessCreate(); return (alerts[alerts.length - 1].match(/phc_[a-z]+_[0-9a-f]{32}/) || [])[0]; };
-  return { ctx, props, alerts, prompts, writes, get, post, makeKey };
+  return { ctx, props, alerts, prompts, writes, get, post, makeKey, sheetRows };
 }
 
 let pass = 0, fail = 0;
@@ -85,7 +88,7 @@ t('after API_KEY is deleted, the old shared key is refused', () => {
 });
 
 t('a staff key can read and write every tab', () => {
-  const s = load(); const k = s.makeKey('Monika', 'staff');
+  const s = load(); const k = s.makeKey('Monika', 'staff'); s.sheetRows.Clients = [{ id: 'C1' }];
   assert.ok(/^phc_staff_[0-9a-f]{32}$/.test(k), k);
   assert.strictEqual(s.get({ action: 'getAll', sheet: 'Leads', key: k }).length, 2);
   assert.deepStrictEqual(s.post({ action: 'update', sheet: 'Clients', id: 'C1', data: {}, key: k }), { success: true });
@@ -103,20 +106,58 @@ t('the website key: ping, health check and add a lead only; it can never read le
   assert.deepStrictEqual(s.post({ action: 'find', sheet: 'Leads', by: { id: 'W-1' }, key: k }), UNAUTH);
 });
 
-t('the bot key: add, update and find a lead; no reading the tab, no deleting, no other tabs', () => {
+t('the bot key: only its own clients; no reading, no generic writes, no other tabs', () => {
   const s = load(); const k = s.makeKey('Telegram bot', 'bot');
-  assert.deepStrictEqual(s.post({ action: 'insert', sheet: 'Leads', data: { id: 'TG-2' }, key: k }), { success: true, id: 'TG-2' });
-  assert.deepStrictEqual(s.post({ action: 'update', sheet: 'Leads', id: 'TG-1', data: {}, key: k }), { success: true });
-  const f = s.post({ action: 'find', sheet: 'Leads', by: { telegram: 'tg:123456' }, key: k });
-  assert.deepStrictEqual(f, { lead: { id: 'TG-1', stage: 'New Lead', agent: 'Nick', telegram: '@taro tg:123456', source: 'Telegram' } });
-  assert.ok(!('phone' in f.lead) && !('fullName' in f.lead), 'find returns only what is needed to update the row');
+  assert.strictEqual(s.get({ action: 'ping', key: k }).ok, true);
+  for (const b of [{ action: 'insert', sheet: 'Leads', data: { id: 'TG-9' } }, { action: 'update', sheet: 'Leads', id: 'W-1', data: {} },
+    { action: 'find', sheet: 'Leads', by: { id: 'W-1' } }, { action: 'delete', sheet: 'Leads', id: 'W-1' }, { action: 'botUpsert', sheet: 'Clients', lead: { id: 'TG-9' } }]) {
+    assert.deepStrictEqual(s.post(Object.assign({ key: k }, b)), UNAUTH, b.action);
+  }
   assert.deepStrictEqual(s.get({ action: 'getAll', sheet: 'Leads', key: k }), UNAUTH);
-  assert.deepStrictEqual(s.post({ action: 'delete', sheet: 'Leads', id: 'TG-1', key: k }), UNAUTH);
-  assert.deepStrictEqual(s.post({ action: 'update', sheet: 'Clients', id: 'C1', data: {}, key: k }), UNAUTH);
 });
 
-t('find matches a whole telegram entry, never part of one', () => {
+t('bot: a new client becomes a quiet row for Nick (no PHC email, no team alert)', () => {
   const s = load(); const k = s.makeKey('Telegram bot', 'bot');
+  const r = s.post({ action: 'botUpsert', sheet: 'Leads', key: k, event: 'Guide sent (JP)',
+    lead: { id: 'TG-777', fullName: 'Taro Yamada', nationality: 'Japanese', telegram: '@taro tg:777', budget: '$100K-$200K', score: 4, notes: 'Telegram bot' } });
+  assert.deepStrictEqual(r, { success: true, created: true });
+  assert.deepStrictEqual(s.writes.pop(), ['insert', 'Leads', 'TG-777', 'quiet']);
+  const row = s.sheetRows.Leads.find((x) => x.id === 'TG-777');
+  assert.strictEqual(row.agent, 'Nick'); assert.strictEqual(row.source, 'Telegram'); assert.strictEqual(row.stage, 'New Lead');
+  assert.strictEqual(JSON.parse(row.activities)[0].note, 'Guide sent (JP)');
+});
+
+t('bot: an existing client gets a new history entry; what the team typed is never overwritten', () => {
+  const s = load(); const k = s.makeKey('Telegram bot', 'bot');
+  s.sheetRows.Leads.push({ id: 'TG-5', fullName: 'Hana', telegram: '@hana tg:5', stage: 'Viewing', agent: 'Nick', notes: 'Called her, wants 2BR',
+    budget: '', interestedIn: 'TS7-5001', activities: JSON.stringify([{ type: 'Call', note: 'First call', ts: '2026-10-20T01:00:00Z' }]) });
+  s.post({ action: 'botUpsert', sheet: 'Leads', key: k, event: 'Asked about MR-6004',
+    lead: { id: 'TG-5', fullName: 'Hana S', telegram: '@hana_s tg:5', budget: '$200K-$300K', interestedIn: 'MR-6004', notes: 'bot text' } });
+  const row = s.sheetRows.Leads.find((x) => x.id === 'TG-5');
+  assert.strictEqual(row.stage, 'Viewing'); assert.strictEqual(row.notes, 'Called her, wants 2BR'); assert.strictEqual(row.fullName, 'Hana');
+  assert.strictEqual(row.budget, '$200K-$300K', 'empty field filled'); assert.strictEqual(row.telegram, '@hana_s tg:5', 'username kept current');
+  assert.strictEqual(row.interestedIn, 'TS7-5001, MR-6004');
+  const acts = JSON.parse(row.activities); assert.strictEqual(acts.length, 2); assert.strictEqual(acts[0].note, 'Asked about MR-6004'); assert.strictEqual(acts[1].note, 'First call');
+});
+
+t('bot: can never write to a website lead, and forgetting a client blanks the personal data', () => {
+  const s = load(); const k = s.makeKey('Telegram bot', 'bot');
+  assert.ok(/TG-123/.test(s.post({ action: 'botUpsert', sheet: 'Leads', key: k, lead: { id: 'W-1', fullName: 'x' } }).error));
+  assert.ok(/TG-123/.test(s.post({ action: 'botForget', sheet: 'Leads', key: k, id: 'W-1' }).error));
+  assert.strictEqual(s.sheetRows.Leads.find((x) => x.id === 'W-1').fullName, 'Web Client');
+  assert.deepStrictEqual(s.post({ action: 'botForget', sheet: 'Leads', key: k, id: 'TG-1' }), { success: true });
+  const row = s.sheetRows.Leads.find((x) => x.id === 'TG-1');
+  assert.ok(/Deleted/.test(row.fullName) && row.telegram === '' && row.stage === 'Released');
+  assert.deepStrictEqual(s.post({ action: 'botForget', sheet: 'Leads', key: k, id: 'TG-404' }), { success: true, missing: true });
+});
+
+t('the website key cannot use the bot actions', () => {
+  const s = load(); const k = s.makeKey('Website', 'website');
+  assert.deepStrictEqual(s.post({ action: 'botUpsert', sheet: 'Leads', key: k, lead: { id: 'TG-1' } }), UNAUTH);
+});
+
+t('find (staff only) matches a whole telegram entry, never part of one', () => {
+  const s = load(); const k = s.makeKey('Nick', 'staff');
   assert.deepStrictEqual(s.post({ action: 'find', sheet: 'Leads', by: { telegram: 'tg:12' }, key: k }), { lead: null });
   assert.strictEqual(s.post({ action: 'find', sheet: 'Leads', by: { telegram: '@TARO' }, key: k }).lead.id, 'TG-1');
 });
