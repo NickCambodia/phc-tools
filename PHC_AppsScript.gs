@@ -57,23 +57,55 @@ const SHEET_HEADERS = {
 
 // ── HTTP entry points ────────────────────────────────────────────
 
-// Set an API_KEY value in Project Settings → Script Properties to require
-// every request to include a matching ?key=... (GET) or {key:...} (POST).
-// Deliberately fails OPEN (allows the request) if no API_KEY property has
-// been set yet, so deploying this code can never lock you out of your own
-// tools mid-rollout — it only enforces once you've actually set the key.
-function isAuthorized_(providedKey) {
-  const required = PropertiesService.getScriptProperties().getProperty('API_KEY');
-  if (!required) return true;
-  return providedKey === required;
+// ── Access keys (2026-10-27) ─────────────────────────────────────
+// Every caller has its own key, and each key can only do what its role allows.
+// Script Properties keep only a SHA-256 fingerprint of each key (property
+// "K_<fingerprint>" = {"name":..,"role":..}), so nobody reading the settings
+// sees a usable key. Keys are made and removed from the sheet menu
+// "PHC Access" (see the end of this file), never written in any tool.
+//   staff   : everything (one key per person, typed once per device in the tools)
+//   website : ping, the daily health check, add a lead (Vercel /api/submit-lead)
+//   bot     : ping, add or update a lead, find a lead (Nick's Telegram bot)
+//   bridge  : add or update a lead, check whether a lead exists (old lead sheet bridge)
+// The old shared API_KEY still counts as staff while it exists in Script
+// Properties; deleting that property is the last step of the switch.
+// A request without a valid key is refused (fails closed).
+const ROLE_CAN_ = {
+  staff:   '*',
+  website: ['ping', 'healthcheck', 'insert:Leads'],
+  bot:     ['ping', 'insert:Leads', 'update:Leads', 'find:Leads'],
+  bridge:  ['insert:Leads', 'update:Leads', 'exists:Leads']
+};
+
+function fingerprint_(key) {
+  return Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, String(key), Utilities.Charset.UTF_8)
+    .map(function (b) { return ('0' + ((b + 256) % 256).toString(16)).slice(-2); }).join('');
+}
+
+function callerFor_(key) {
+  if (!key) return null;
+  const props = PropertiesService.getScriptProperties();
+  const legacy = props.getProperty('API_KEY');
+  if (legacy && String(key) === legacy) return { name: 'shared key', role: 'staff' };
+  const v = props.getProperty('K_' + fingerprint_(key));
+  if (!v) return null;
+  try { return JSON.parse(v); } catch (err) { return null; }
+}
+
+function allowed_(caller, action, sheet) {
+  if (!caller) return false;
+  const can = ROLE_CAN_[caller.role];
+  if (can === '*') return true;
+  return !!can && (can.indexOf(action) !== -1 || can.indexOf(action + ':' + sheet) !== -1);
 }
 
 function doGet(e) {
   try {
     const p = e.parameter || {};
-    if (!isAuthorized_(p.key)) return respond({ error: 'Unauthorized' });
+    const sheet = p.sheet || 'Tasks';
+    if (!allowed_(callerFor_(p.key), p.action, sheet)) return respond({ error: 'Unauthorized' });
     if (p.action === 'ping')   return respond({ ok: true, ts: new Date().toISOString() });
-    if (p.action === 'getAll') return respond(getAllRows(p.sheet || 'Tasks'));
+    if (p.action === 'getAll') return respond(getAllRows(sheet));
     return respond({ error: 'Unknown action: ' + p.action });
   } catch (err) {
     return respond({ error: err.toString() });
@@ -83,15 +115,33 @@ function doGet(e) {
 function doPost(e) {
   try {
     const body  = JSON.parse(e.postData.contents);
-    if (!isAuthorized_(body.key)) return respond({ error: 'Unauthorized' });
     const sheet = body.sheet || 'Tasks';
+    if (!allowed_(callerFor_(body.key), body.action, sheet)) return respond({ error: 'Unauthorized' });
     if (body.action === 'insert') return respond(insertRow(sheet, body.data));
     if (body.action === 'update') return respond(updateRow(sheet, body.id, body.data));
     if (body.action === 'delete') return respond(deleteRow(sheet, body.id));
+    if (body.action === 'find')   return respond(findLead_(body.by || {}));
+    if (body.action === 'exists') return respond({ exists: !!findLead_({ id: body.id }).lead });
     return respond({ error: 'Unknown action: ' + body.action });
   } catch (err) {
     return respond({ error: err.toString() });
   }
+}
+
+// Finds one lead by id or by telegram (the telegram column may hold "@username" or "tg:123456").
+// Returns only what a caller needs to update the row, never the whole Leads tab.
+function findLead_(by) {
+  const rows = getAllRows('Leads');
+  const want = function (r) {
+    if (by.id && String(r.id) === String(by.id)) return true;
+    if (by.telegram) {
+      const have = String(r.telegram || '').toLowerCase().split(/[\s,]+/).filter(String);
+      return String(by.telegram).toLowerCase().split(/[\s,]+/).filter(String).some(function (x) { return have.indexOf(x) !== -1; });
+    }
+    return false;
+  };
+  const r = rows.filter(want)[0];
+  return r ? { lead: { id: r.id, stage: r.stage, agent: r.agent, telegram: r.telegram, source: r.source } } : { lead: null };
 }
 
 function respond(data) {
@@ -1363,4 +1413,60 @@ function sendAgentNotification(lead, scenario, lang) {
     name:     'PHC CRM',
     from:     FROM_EMAIL,
   });
+}
+
+// ── PHC Access menu (2026-10-27): make, list and remove access keys ─────
+// Appears in the PHC CRM sheet as the menu "PHC Access". A new key is shown
+// once in a dialog and never stored in readable form, so copy it right away.
+// Making a key for a name that already has one replaces the old key
+// (for example after a lost phone): the old key stops working at once.
+function onOpen() {
+  SpreadsheetApp.getUi().createMenu('PHC Access')
+    .addItem('Create or replace an access key', 'accessCreate')
+    .addItem('List access keys', 'accessList')
+    .addItem('Remove an access key', 'accessRemove')
+    .addToUi();
+}
+
+function accessKeys_() {
+  const all = PropertiesService.getScriptProperties().getProperties();
+  return Object.keys(all).filter(function (k) { return k.indexOf('K_') === 0; }).map(function (k) {
+    let v = {}; try { v = JSON.parse(all[k]); } catch (err) {}
+    return { prop: k, name: v.name || '?', role: v.role || '?', created: v.created || '' };
+  });
+}
+
+function accessCreate() {
+  const ui = SpreadsheetApp.getUi();
+  const n = ui.prompt('Create or replace an access key', 'Who or what is this key for? (for example Nick, Monika, Website, Telegram bot)', ui.ButtonSet.OK_CANCEL);
+  if (n.getSelectedButton() !== ui.Button.OK) return;
+  const name = n.getResponseText().trim();
+  if (!name) return;
+  const r = ui.prompt('Role for ' + name, 'Type one: staff, website, bot or bridge', ui.ButtonSet.OK_CANCEL);
+  if (r.getSelectedButton() !== ui.Button.OK) return;
+  const role = r.getResponseText().trim().toLowerCase();
+  if (!ROLE_CAN_[role]) { ui.alert('Unknown role "' + role + '". Use staff, website, bot or bridge.'); return; }
+  const props = PropertiesService.getScriptProperties();
+  accessKeys_().filter(function (k) { return k.name.toLowerCase() === name.toLowerCase(); })
+    .forEach(function (k) { props.deleteProperty(k.prop); });
+  const key = 'phc_' + role + '_' + Utilities.getUuid().replace(/-/g, '');
+  props.setProperty('K_' + fingerprint_(key), JSON.stringify({ name: name, role: role, created: new Date().toISOString().slice(0, 10) }));
+  ui.alert('Access key for ' + name + ' (' + role + ')',
+    key + '\n\nCopy it now: it is shown only this once.\nSend it to the person privately (not in a group).', ui.ButtonSet.OK);
+}
+
+function accessList() {
+  const rows = accessKeys_().map(function (k) { return k.name + '  ·  ' + k.role + (k.created ? '  ·  made ' + k.created : ''); });
+  const legacy = PropertiesService.getScriptProperties().getProperty('API_KEY') ? '\n\nThe old shared key (API_KEY) still works.' : '\n\nThe old shared key is switched off.';
+  SpreadsheetApp.getUi().alert('Access keys', (rows.length ? rows.join('\n') : 'No access keys yet.') + legacy, SpreadsheetApp.getUi().ButtonSet.OK);
+}
+
+function accessRemove() {
+  const ui = SpreadsheetApp.getUi();
+  const n = ui.prompt('Remove an access key', 'Name of the key to remove (as shown in List access keys)', ui.ButtonSet.OK_CANCEL);
+  if (n.getSelectedButton() !== ui.Button.OK) return;
+  const name = n.getResponseText().trim().toLowerCase();
+  const hit = accessKeys_().filter(function (k) { return k.name.toLowerCase() === name; });
+  hit.forEach(function (k) { PropertiesService.getScriptProperties().deleteProperty(k.prop); });
+  ui.alert(hit.length ? 'Removed. That key no longer works.' : 'No key with that name.');
 }

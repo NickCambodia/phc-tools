@@ -624,7 +624,15 @@ input.vt-sel::placeholder{color:var(--text-m)}
 const LS_API  = 'phc_api_v3';
 const LS_DATA = 'phc_leads_v3';
 const DEFAULT_API = 'https://script.google.com/macros/s/AKfycbzlAxcJqEI3upZ18sm-mj2Gxd3w2XSkD_YYqgkZ4kdw2_AV3V8f2B4qVcPESHZTOq2k8Q/exec';
-const API_KEY     = '4fa0044f8132a04af7a24bface7613efe2152f97d9dcd432';
+// Each person's PHC access code (2026-10-27): typed once on this device and kept only on it.
+// It is never written in this file, because this file is public. Ask Nick for yours.
+function phcKey(){
+  let c=''; try{ c=localStorage.getItem('phc_access_code')||''; }catch(e){}
+  if(!c){ c=(window.prompt('Your PHC access code (ask Nick). You only enter it once on this device.')||'').trim(); if(c){ try{ localStorage.setItem('phc_access_code',c); }catch(e){} } }
+  return c;
+}
+// If the CRM refuses the code (mistyped or switched off), forget it so the next visit asks again.
+(function(){ const f=window.fetch; window.fetch=async function(u){ const r=await f.apply(this,arguments); try{ if(String(u).indexOf('script.google.com')!==-1&&r.type!=='opaque'){ const j=await r.clone().json(); if(j&&j.error==='Unauthorized'){ try{ localStorage.removeItem('phc_access_code'); }catch(e){} if(!window.__phcKeyWarned){ window.__phcKeyWarned=true; alert('Your PHC access code was not accepted. Reload the page and enter it again.'); } } } }catch(e){} return r; }; })();
 let API_URL      = localStorage.getItem(LS_API) || DEFAULT_API;
 let leads        = [];
 let currentView  = 'kanban';
@@ -1109,11 +1117,11 @@ async function confirmAssignment(id){
 // API
 async function apiGET(q){
   if(!API_URL) return null;
-  try{ var r=await fetch(API_URL+'?'+new URLSearchParams(Object.assign({key:API_KEY},q))); return await r.json(); }catch{return null;}
+  try{ var r=await fetch(API_URL+'?'+new URLSearchParams(Object.assign({key:phcKey()},q))); return await r.json(); }catch{return null;}
 }
 async function apiPOST(body){
   if(!API_URL) return null;
-  try{ await fetch(API_URL,{method:'POST',headers:{'Content-Type':'text/plain'},body:JSON.stringify(Object.assign({key:API_KEY},body)),mode:'no-cors'}); return {ok:true}; }catch{return null;}
+  try{ await fetch(API_URL,{method:'POST',headers:{'Content-Type':'text/plain'},body:JSON.stringify(Object.assign({key:phcKey()},body)),mode:'no-cors'}); return {ok:true}; }catch{return null;}
 }
 let partners=[];
 async function loadPartners(){

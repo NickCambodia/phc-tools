@@ -877,7 +877,15 @@ const LS_ME    = 'phc_identity';
 
 // ───── STATE ─────
 const DEFAULT_API = 'https://script.google.com/macros/s/AKfycbyCd3r8sX18YONWUf98_eB_B3uuXbn3ALq8A7ataIysQfUPU9y43DvZUe-OoRIticXBzg/exec';
-const API_KEY     = '4fa0044f8132a04af7a24bface7613efe2152f97d9dcd432';
+// Each person's PHC access code (2026-10-27): typed once on this device and kept only on it.
+// It is never written in this file, because this file is public. Ask Nick for yours.
+function phcKey(){
+  let c=''; try{ c=localStorage.getItem('phc_access_code')||''; }catch(e){}
+  if(!c){ c=(window.prompt('Your PHC access code (ask Nick). You only enter it once on this device.')||'').trim(); if(c){ try{ localStorage.setItem('phc_access_code',c); }catch(e){} } }
+  return c;
+}
+// If the CRM refuses the code (mistyped or switched off), forget it so the next visit asks again.
+(function(){ const f=window.fetch; window.fetch=async function(u){ const r=await f.apply(this,arguments); try{ if(String(u).indexOf('script.google.com')!==-1&&r.type!=='opaque'){ const j=await r.clone().json(); if(j&&j.error==='Unauthorized'){ try{ localStorage.removeItem('phc_access_code'); }catch(e){} if(!window.__phcKeyWarned){ window.__phcKeyWarned=true; alert('Your PHC access code was not accepted. Reload the page and enter it again.'); } } } }catch(e){} return r; }; })();
 let apiUrl        = localStorage.getItem(LS_API) || DEFAULT_API;
 let currentView   = 'list';
 let currentNav    = 'my-tasks';
@@ -1204,7 +1212,7 @@ function setSyncState(state, label){
 async function apiFetch(params){
   if(!apiUrl) return null;
   try {
-    const qs = Object.entries(Object.assign({key:API_KEY},params)).map(([k,v])=>k+'='+encodeURIComponent(v)).join('&');
+    const qs = Object.entries(Object.assign({key:phcKey()},params)).map(([k,v])=>k+'='+encodeURIComponent(v)).join('&');
     const res = await fetch(apiUrl+'?'+qs);
     return await res.json();
   } catch(e){ return null; }
@@ -1220,7 +1228,7 @@ async function apiPost(body){
     await fetch(apiUrl,{
       method:'POST',
       headers:{'Content-Type':'text/plain'},
-      body: JSON.stringify(Object.assign({key:API_KEY},body)),
+      body: JSON.stringify(Object.assign({key:phcKey()},body)),
       mode:'no-cors'
     });
     return { success:true };
@@ -1300,7 +1308,7 @@ async function saveAndConnect(){
   if(st) st.textContent = 'Testing connection…';
   // Ping first
   try {
-    const qs = 'action=ping&key='+encodeURIComponent(API_KEY);
+    const qs = 'action=ping&key='+encodeURIComponent(phcKey());
     const res = await fetch(url+'?'+qs);
     const json = await res.json();
     if(!json.ok){ if(st) st.textContent='❌ Ping failed — check URL and deployment settings.'; return; }

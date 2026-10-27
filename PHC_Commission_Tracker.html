@@ -616,7 +616,15 @@ tbody tr:hover{background:var(--g1);}
 
 <script>
 const API_URL = 'https://script.google.com/macros/s/AKfycbyCd3r8sX18YONWUf98_eB_B3uuXbn3ALq8A7ataIysQfUPU9y43DvZUe-OoRIticXBzg/exec';
-const API_KEY = '4fa0044f8132a04af7a24bface7613efe2152f97d9dcd432';
+// Each person's PHC access code (2026-10-27): typed once on this device and kept only on it.
+// It is never written in this file, because this file is public. Ask Nick for yours.
+function phcKey(){
+  let c=''; try{ c=localStorage.getItem('phc_access_code')||''; }catch(e){}
+  if(!c){ c=(window.prompt('Your PHC access code (ask Nick). You only enter it once on this device.')||'').trim(); if(c){ try{ localStorage.setItem('phc_access_code',c); }catch(e){} } }
+  return c;
+}
+// If the CRM refuses the code (mistyped or switched off), forget it so the next visit asks again.
+(function(){ const f=window.fetch; window.fetch=async function(u){ const r=await f.apply(this,arguments); try{ if(String(u).indexOf('script.google.com')!==-1&&r.type!=='opaque'){ const j=await r.clone().json(); if(j&&j.error==='Unauthorized'){ try{ localStorage.removeItem('phc_access_code'); }catch(e){} if(!window.__phcKeyWarned){ window.__phcKeyWarned=true; alert('Your PHC access code was not accepted. Reload the page and enter it again.'); } } } }catch(e){} return r; }; })();
 const LS_KEY  = 'phc_deals_cache';
 const LS_PARTNERS = 'phc_partners_cache';
 const SITE_URL = 'https://propertyhubcambodia.com/';
@@ -677,7 +685,7 @@ let clientsCache = null;
 
 async function fetchSheet(sheet){
   try{
-    const r=await fetch(API_URL+'?action=getAll&sheet='+sheet+'&key='+encodeURIComponent(API_KEY));
+    const r=await fetch(API_URL+'?action=getAll&sheet='+sheet+'&key='+encodeURIComponent(phcKey()));
     const data=await r.json();
     return Array.isArray(data)?data:[];
   }catch{ return []; }
@@ -849,12 +857,12 @@ function buildMonthPicker(){
 // ── API ──────────────────────────────────────────────────────────
 
 async function apiPOST(body){
-  try{ await fetch(API_URL,{method:'POST',headers:{'Content-Type':'text/plain'},body:JSON.stringify(Object.assign({key:API_KEY},body)),mode:'no-cors'}); return {ok:true}; }catch{return null;}
+  try{ await fetch(API_URL,{method:'POST',headers:{'Content-Type':'text/plain'},body:JSON.stringify(Object.assign({key:phcKey()},body)),mode:'no-cors'}); return {ok:true}; }catch{return null;}
 }
 
 async function loadPartners(){
   try{
-    const r=await fetch(API_URL+'?action=getAll&sheet=Partners&key='+encodeURIComponent(API_KEY));
+    const r=await fetch(API_URL+'?action=getAll&sheet=Partners&key='+encodeURIComponent(phcKey()));
     const data=await r.json();
     if(Array.isArray(data)){
       allPartners=data;
@@ -897,7 +905,7 @@ function copyReferralLink(slug){
 
 async function loadDeals(){
   try{
-    const r=await fetch(API_URL+'?action=getAll&sheet=Deals&key='+encodeURIComponent(API_KEY));
+    const r=await fetch(API_URL+'?action=getAll&sheet=Deals&key='+encodeURIComponent(phcKey()));
     const data=await r.json();
     if(Array.isArray(data)){
       deals=data.filter(d=>d.id).map(d=>({
